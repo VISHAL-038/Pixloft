@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}New Project — Pixloft{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="auth-card">
+    <h1>New project</h1>
+    <p class="auth-sub">Give your project a name</p>
+
+    <form method="post">
+      {% csrf_token %}
+      <div class="form-group">
+        <label for="name">Project name</label>
+        <input type="text" name="name" id="name" placeholder="e.g. Summer 2024" autofocus required>
+      </div>
+      <button type="submit" class="btn btn--primary btn--full">Create project</button>
+    </form>
+
+    <p class="auth-footer"><a href="{% url 'projects:list' %}">← Back to projects</a></p>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block title %}My Projects — Pixloft{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>My Projects</h1>
+  <a href="{% url 'projects:create' %}" class="btn btn--primary">+ New Project</a>
+</div>
+
+<div class="project-grid">
+  {% for project in projects %}
+  <a href="{% url 'projects:detail' project.pk %}" class="project-card">
+    <div class="project-card__icon">◈</div>
+    <div class="project-card__name">{{ project.name }}</div>
+    <div class="project-card__meta">
+      {{ project.image_count }} image{{ project.image_count|pluralize }}
+      &nbsp;·&nbsp;
+      {{ project.updated_at|date:"M d, Y" }}
+    </div>
+  </a>
+  {% empty %}
+  <div class="empty-state">
+    <div class="empty-icon">◈</div>
+    <p>No projects yet</p>
+    <a href="{% url 'projects:create' %}" class="btn btn--primary">Create your first project</a>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

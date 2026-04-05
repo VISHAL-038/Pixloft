@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}Delete Project — Pixloft{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="auth-card">
+    <h1>Delete project?</h1>
+    <p class="auth-sub">This will permanently delete <strong>{{ project.name }}</strong> and all its images.</p>
+
+    <form method="post" style="display:flex;flex-direction:column;gap:10px;margin-top:24px;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn--danger btn--full">Yes, delete</button>
+      <a href="{% url 'projects:detail' project.pk %}" class="btn btn--ghost btn--full">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

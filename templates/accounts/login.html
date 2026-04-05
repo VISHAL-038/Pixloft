@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block title %}Sign In — Pixloft{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="auth-card">
+
+    <div class="auth-brand">◈ Pixloft</div>
+    <h1>Welcome back</h1>
+    <p class="auth-sub">Sign in to your workspace</p>
+
+    <form method="post">
+      {% csrf_token %}
+
+      <div class="form-group">
+        <label for="id_username">Username</label>
+        <input type="text" name="username" id="id_username" autofocus required>
+      </div>
+
+      <div class="form-group">
+        <label for="id_password">Password</label>
+        <input type="password" name="password" id="id_password" required>
+      </div>
+
+      {% if form.errors %}
+      <div class="form-error">Invalid username or password.</div>
+      {% endif %}
+
+      <button type="submit" class="btn btn--primary btn--full">Sign in</button>
+    </form>
+
+    <p class="auth-footer">No account? <a href="{% url 'accounts:signup' %}">Create one</a></p>
+  </div>
+</div>
+{% endblock %}

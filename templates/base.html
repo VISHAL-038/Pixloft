@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Pixloft{% endblock %}</title>
+  {% load static %}
+  <link rel="stylesheet" href="{% static 'css/main.css' %}">
+  {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+  {% if user.is_authenticated %}
+  <nav class="navbar">
+    <a class="nav-brand" href="{% url 'projects:list' %}">
+      <span class="brand-icon">◈</span> Pixloft
+    </a>
+    <div class="nav-links">
+      <a href="{% url 'projects:list' %}">My Projects</a>
+      <span class="nav-user">{{ user.username }}</span>
+      <a href="{% url 'accounts:logout' %}" class="btn-logout">Sign out</a>
+    </div>
+  </nav>
+  {% endif %}
+
+  <main>
+    {% if messages %}
+    <div class="messages">
+      {% for message in messages %}
+      <div class="message message--{{ message.tags }}">{{ message }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="{% static 'js/main.js' %}"></script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

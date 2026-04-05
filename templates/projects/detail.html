@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}{{ project.name }} — Pixloft{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>{{ project.name }}</h1>
+  <div style="display:flex;gap:10px;">
+    <a href="{% url 'projects:list' %}" class="btn btn--ghost">← Projects</a>
+    <a href="{% url 'projects:delete' project.pk %}" class="btn btn--danger">Delete</a>
+  </div>
+</div>
+
+<div class="empty-state">
+  <div class="empty-icon">🖼</div>
+  <p>No images yet — image upload coming Day 3</p>
+</div>
+{% endblock %}
