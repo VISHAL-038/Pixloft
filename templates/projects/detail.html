@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% load static %}
 {% block title %}{{ project.name }} — Pixloft{% endblock %}
 
 {% block content %}
@@ -10,8 +11,170 @@
   </div>
 </div>
 
-<div class="empty-state">
-  <div class="empty-icon">🖼</div>
-  <p>No images yet — image upload coming Day 3</p>
+<!-- Upload area -->
+<div class="upload-zone" id="uploadZone">
+  <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
+  <div class="upload-zone__inner" id="uploadInner">
+    <div class="upload-icon">⬆</div>
+    <p class="upload-title">Drop images here or <span class="upload-link">browse</span></p>
+    <p class="upload-hint">JPEG, PNG, WEBP, TIFF · Max 20MB each</p>
+  </div>
+  <div class="upload-progress" id="uploadProgress" style="display:none;">
+    <div class="upload-progress__bar" id="progressBar"></div>
+  </div>
 </div>
+
+<!-- Upload errors -->
+<div id="uploadErrors"></div>
+
+<!-- Image grid -->
+<div class="image-grid" id="imageGrid">
+  {% for image in images %}
+  <div class="image-card" id="img-{{ image.pk }}">
+    <a href="/editor/{{ image.pk }}/" class="image-card__thumb">
+      <img src="{{ image.file.url }}" alt="{{ image.original_name }}" loading="lazy">
+      <div class="image-card__overlay">
+        <span class="image-card__edit">Edit ✏</span>
+      </div>
+    </a>
+    <div class="image-card__info">
+      <div class="image-card__name" title="{{ image.original_name }}">{{ image.original_name }}</div>
+      <div class="image-card__meta">
+        {% if image.resolution %}{{ image.resolution }} · {% endif %}
+        {{ image.file_size_display }}
+      </div>
+    </div>
+    <form method="post" action="{% url 'editor:delete' image.pk %}" class="image-card__delete-form">
+      {% csrf_token %}
+      <button type="submit" class="image-card__delete" title="Delete image"
+        onclick="return confirm('Delete this image?')">✕</button>
+    </form>
+  </div>
+  {% empty %}
+  <div class="empty-state" id="emptyState">
+    <div class="empty-icon">🖼</div>
+    <p>No images yet — upload some above</p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const PROJECT_ID = "{{ project.pk }}";
+const UPLOAD_URL = "{% url 'editor:upload' %}";
+const CSRF_TOKEN = "{{ csrf_token }}";
+
+const uploadZone  = document.getElementById('uploadZone');
+const fileInput   = document.getElementById('fileInput');
+const uploadInner = document.getElementById('uploadInner');
+const uploadProg  = document.getElementById('uploadProgress');
+const progressBar = document.getElementById('progressBar');
+const imageGrid   = document.getElementById('imageGrid');
+const errorsDiv   = document.getElementById('uploadErrors');
+
+// Click to browse
+uploadInner.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+// Drag and drop
+uploadZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  uploadZone.classList.add('upload-zone--active');
+});
+uploadZone.addEventListener('dragleave', () => {
+  uploadZone.classList.remove('upload-zone--active');
+});
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('upload-zone--active');
+  handleFiles(e.dataTransfer.files);
+});
+
+async function handleFiles(files) {
+  errorsDiv.innerHTML = '';
+  const fileArr = Array.from(files);
+
+  for (const file of fileArr) {
+    await uploadFile(file);
+  }
+}
+
+async function uploadFile(file) {
+  // Show progress bar
+  uploadProg.style.display = 'block';
+  progressBar.style.width = '0%';
+
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('project_id', PROJECT_ID);
+
+  try {
+    // Animate progress bar (fake progress while uploading)
+    let progress = 0;
+    const interval = setInterval(() => {
+      progress = Math.min(progress + 10, 85);
+      progressBar.style.width = progress + '%';
+    }, 150);
+
+    const res = await fetch(UPLOAD_URL, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': CSRF_TOKEN },
+      body: formData,
+    });
+
+    clearInterval(interval);
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError(data.error || 'Upload failed');
+      uploadProg.style.display = 'none';
+      return;
+    }
+
+    // Complete progress
+    progressBar.style.width = '100%';
+    setTimeout(() => { uploadProg.style.display = 'none'; }, 600);
+
+    // Add image card to grid without page reload
+    addImageCard(data);
+
+  } catch (err) {
+    showError('Network error — please try again');
+    uploadProg.style.display = 'none';
+  }
+}
+
+function addImageCard(data) {
+  // Remove empty state if present
+  const empty = document.getElementById('emptyState');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'image-card';
+  card.id = `img-${data.id}`;
+  card.innerHTML = `
+    <a href="${data.editor_url}" class="image-card__thumb">
+      <img src="${data.url}" alt="${data.name}" loading="lazy">
+      <div class="image-card__overlay">
+        <span class="image-card__edit">Edit ✏</span>
+      </div>
+    </a>
+    <div class="image-card__info">
+      <div class="image-card__name" title="${data.name}">${data.name}</div>
+      <div class="image-card__meta">${data.resolution ? data.resolution + ' · ' : ''}${data.size}</div>
+    </div>
+  `;
+  // Prepend so newest appears first
+  imageGrid.insertBefore(card, imageGrid.firstChild);
+}
+
+function showError(msg) {
+  const div = document.createElement('div');
+  div.className = 'upload-error';
+  div.textContent = msg;
+  errorsDiv.appendChild(div);
+  setTimeout(() => div.remove(), 5000);
+}
+</script>
 {% endblock %}

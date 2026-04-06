@@ -1,6 +1,7 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from .models import Project
+from editor.models import Image
 
 @login_required
 def project_list(request):
@@ -18,7 +19,11 @@ def project_create(request):
 @login_required
 def project_detail(request, pk):
     project = get_object_or_404(Project, pk=pk, user=request.user)
-    return render(request, 'projects/detail.html', {'project': project})
+    images = Image.objects.filter(project=project).order_by('-created_at')
+    return render(request, 'projects/detail.html', {
+        'project': project,
+        'images': images,
+    })
 
 @login_required
 def project_delete(request, pk):

@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}{{ image.original_name }} — Pixloft{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>{{ image.original_name }}</h1>
+  <a href="{% url 'projects:detail' image.project.pk %}" class="btn btn--ghost">← Back to project</a>
+</div>
+
+<div style="text-align:center;padding:60px 20px;color:var(--text-muted);">
+  <img src="{{ image.file.url }}" style="max-width:100%;max-height:60vh;border-radius:8px;">
+  <p style="margin-top:16px;font-size:14px;">
+    {{ image.resolution }} · {{ image.file_size_display }}
+  </p>
+  <p style="margin-top:8px;font-size:13px;">Full editor canvas coming Day 5 ✦</p>
+</div>
+{% endblock %}
