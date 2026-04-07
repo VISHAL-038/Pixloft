@@ -1,17 +1,225 @@
 {% extends 'base.html' %}
+{% load static %}
 {% block title %}{{ image.original_name }} — Pixloft{% endblock %}
 
-{% block content %}
-<div class="page-header">
-  <h1>{{ image.original_name }}</h1>
-  <a href="{% url 'projects:detail' image.project.pk %}" class="btn btn--ghost">← Back to project</a>
-</div>
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/editor.css' %}">
+{% endblock %}
 
-<div style="text-align:center;padding:60px 20px;color:var(--text-muted);">
-  <img src="{{ image.file.url }}" style="max-width:100%;max-height:60vh;border-radius:8px;">
-  <p style="margin-top:16px;font-size:14px;">
-    {{ image.resolution }} · {{ image.file_size_display }}
-  </p>
-  <p style="margin-top:8px;font-size:13px;">Full editor canvas coming Day 5 ✦</p>
+{% block content %}
+<div class="editor-shell">
+
+  <!-- ===== TOP BAR ===== -->
+  <header class="editor-topbar">
+    <div class="topbar-left">
+      <a href="{% url 'projects:detail' image.project.pk %}" class="topbar-back">
+        ← {{ image.project.name }}
+      </a>
+      <span class="topbar-filename">{{ image.original_name }}</span>
+    </div>
+
+    <div class="topbar-center">
+      <button class="topbar-btn" id="btnZoomOut" title="Zoom out">−</button>
+      <span class="topbar-zoom" id="zoomLabel">100%</span>
+      <button class="topbar-btn" id="btnZoomIn" title="Zoom in">+</button>
+      <button class="topbar-btn" id="btnFit" title="Fit to screen">⊡</button>
+    </div>
+
+    <div class="topbar-right">
+        <button class="topbar-btn" id="btnUndo" title="Undo (Ctrl+Z)" disabled>↩ Undo</button>
+        <button class="topbar-btn" id="btnRedo" title="Redo (Ctrl+Y)" disabled>↪ Redo</button>
+        <button class="topbar-btn" id="btnBefore" title="Before/After (B)">◧ Before</button>
+        <button class="topbar-btn" id="btnReset" title="Reset all edits (R)">↺ Reset</button>
+        <button class="btn btn--primary" id="btnExport">⬇ Export</button>
+      </div>
+  </header>
+
+  <!-- ===== MAIN EDITOR AREA ===== -->
+  <div class="editor-main">
+
+    <!-- LEFT PANEL — Tools -->
+    <aside class="panel panel--left" id="leftPanel">
+      <div class="panel-section">
+        <div class="panel-label">Tools</div>
+        <div class="tool-grid">
+          <button class="tool-btn active" id="toolSelect" data-tool="select" title="Select">
+            <span class="tool-icon">↖</span>
+            <span class="tool-name">Select</span>
+          </button>
+          <button class="tool-btn" id="toolCrop" data-tool="crop" title="Crop">
+            <span class="tool-icon">⊡</span>
+            <span class="tool-name">Crop</span>
+          </button>
+          <button class="tool-btn" id="toolRotate" data-tool="rotate" title="Rotate">
+            <span class="tool-icon">↻</span>
+            <span class="tool-name">Rotate</span>
+          </button>
+          <button class="tool-btn" id="toolFlip" data-tool="flip" title="Flip">
+            <span class="tool-icon">⇔</span>
+            <span class="tool-name">Flip</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-label">Histogram</div>
+        <canvas class="histogram-canvas" id="histogramCanvas" width="180" height="80"></canvas>
+      </div>
+
+      <div class="panel-section">
+        <div class="panel-label">Image Info</div>
+        <div class="info-row">
+          <span class="info-key">File</span>
+          <span class="info-val">{{ image.original_name }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-key">Size</span>
+          <span class="info-val">{{ image.file_size_display }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-key">Resolution</span>
+          <span class="info-val">{{ image.resolution }}</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER — Canvas -->
+    <main class="editor-canvas-area" id="canvasArea">
+      <div class="canvas-wrapper" id="canvasWrapper">
+        <canvas id="mainCanvas"></canvas>
+      </div>
+      <div class="canvas-hint" id="canvasHint">Loading image...</div>
+    </main>
+
+    <!-- RIGHT PANEL — Adjustments -->
+    <aside class="panel panel--right" id="rightPanel">
+
+      <!-- Accordion sections -->
+      <div class="accordion" id="accordion">
+
+        <!-- Light -->
+        <div class="accordion-section open">
+          <button class="accordion-header">
+            <span>☀ Light</span>
+            <span class="accordion-arrow">▾</span>
+          </button>
+          <div class="accordion-body">
+            <div class="slider-row">
+              <label>Exposure</label>
+              <input type="range" min="-100" max="100" value="0" data-param="exposure" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Brightness</label>
+              <input type="range" min="-100" max="100" value="0" data-param="brightness" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Contrast</label>
+              <input type="range" min="-100" max="100" value="0" data-param="contrast" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Highlights</label>
+              <input type="range" min="-100" max="100" value="0" data-param="highlights" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Shadows</label>
+              <input type="range" min="-100" max="100" value="0" data-param="shadows" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Color -->
+        <div class="accordion-section">
+          <button class="accordion-header">
+            <span>🎨 Color</span>
+            <span class="accordion-arrow">▾</span>
+          </button>
+          <div class="accordion-body" style="display:none;">
+            <div class="slider-row">
+              <label>Saturation</label>
+              <input type="range" min="-100" max="100" value="0" data-param="saturation" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Vibrance</label>
+              <input type="range" min="-100" max="100" value="0" data-param="vibrance" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Temperature</label>
+              <input type="range" min="-100" max="100" value="0" data-param="temperature" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Tint</label>
+              <input type="range" min="-100" max="100" value="0" data-param="tint" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detail -->
+        <div class="accordion-section">
+          <button class="accordion-header">
+            <span>◈ Detail</span>
+            <span class="accordion-arrow">▾</span>
+          </button>
+          <div class="accordion-body" style="display:none;">
+            <div class="slider-row">
+              <label>Sharpness</label>
+              <input type="range" min="0" max="100" value="0" data-param="sharpness" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Noise Reduction</label>
+              <input type="range" min="0" max="100" value="0" data-param="noise_reduction" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Effects -->
+        <div class="accordion-section">
+          <button class="accordion-header">
+            <span>✦ Effects</span>
+            <span class="accordion-arrow">▾</span>
+          </button>
+          <div class="accordion-body" style="display:none;">
+            <div class="slider-row">
+              <label>Vignette</label>
+              <input type="range" min="-100" max="100" value="0" data-param="vignette" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+            <div class="slider-row">
+              <label>Grain</label>
+              <input type="range" min="0" max="100" value="0" data-param="grain" class="adj-slider">
+              <span class="slider-val">0</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <!-- end accordion -->
+
+    </aside>
+    <!-- end right panel -->
+
+  </div>
+  <!-- end editor-main -->
+
 </div>
+<!-- end editor-shell -->
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Image source passed from Django
+const IMAGE_URL = "{{ image.file.url }}";
+const IMAGE_ID  = {{ image.pk }};
+</script>
+<script src="{% static 'js/editor.js' %}"></script>
 {% endblock %}

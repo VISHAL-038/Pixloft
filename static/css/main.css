@@ -352,3 +352,5 @@
 }
 .image-card:hover .image-card__delete { opacity: 1; }
 .image-card__delete:hover { background: var(--danger); }
+
+

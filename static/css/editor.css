@@ -1,0 +1,348 @@
+/* ===== Editor Shell — Pixloft ===== */
+
+/* Override main layout for editor — full viewport */
+body:has(.editor-shell) main {
+    padding: 0;
+    max-width: 100%;
+  }
+  
+  .editor-shell {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 52px); /* subtract navbar height */
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+  
+  /* ===== Top Bar ===== */
+  .editor-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 48px;
+    padding: 0 16px;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 12px;
+    z-index: 10;
+  }
+  
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+  }
+  .topbar-back {
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .topbar-back:hover { color: var(--text-primary); }
+  .topbar-filename {
+    font-size: 13px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .topbar-center {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .topbar-zoom {
+    font-size: 13px;
+    color: var(--text-secondary);
+    min-width: 44px;
+    text-align: center;
+  }
+  
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    flex: 1;
+    justify-content: flex-end;
+  }
+  
+  .topbar-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .topbar-btn:hover {
+    background: var(--bg-2);
+    color: var(--text-primary);
+  }
+  .topbar-btn.active {
+    background: var(--bg-3);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  
+  /* ===== Editor Main ===== */
+  .editor-main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  
+  /* ===== Panels ===== */
+  .panel {
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--bg-1);
+    border-color: var(--border);
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .panel--left  { border-right: 1px solid var(--border); }
+  .panel--right { border-left: 1px solid var(--border); width: 240px; }
+  
+  /* Scrollbar styling */
+  .panel::-webkit-scrollbar { width: 4px; }
+  .panel::-webkit-scrollbar-track { background: transparent; }
+  .panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  
+  .panel-section {
+    padding: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+  
+  /* ===== Tool Grid ===== */
+  .tool-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .tool-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    font-size: 12px;
+  }
+  .tool-btn:hover {
+    background: var(--bg-3);
+    color: var(--text-primary);
+  }
+  .tool-btn.active {
+    background: rgba(124, 111, 255, 0.12);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .tool-icon { font-size: 16px; }
+  .tool-name { font-size: 11px; }
+  
+  /* ===== Histogram ===== */
+  .histogram-canvas {
+    width: 100%;
+    height: 80px;
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    display: block;
+  }
+  
+  /* ===== Info Rows ===== */
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .info-row:last-child { border-bottom: none; }
+  .info-key { color: var(--text-muted); }
+  .info-val {
+    color: var(--text-secondary);
+    text-align: right;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  /* ===== Canvas Area ===== */
+  .editor-canvas-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-0);
+    overflow: hidden;
+    position: relative;
+  }
+  
+  .canvas-wrapper {
+    position: relative;
+    display: inline-block;
+    transform-origin: center center;
+    transition: transform 0.15s ease;
+  }
+  
+  #mainCanvas {
+    display: block;
+    border-radius: 4px;
+    box-shadow: 0 4px 32px rgba(0,0,0,0.5);
+    max-width: 100%;
+    cursor: crosshair;
+  }
+  
+  .canvas-hint {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--bg-1);
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  
+  /* ===== Accordion (Right Panel) ===== */
+  .accordion-section {
+    border-bottom: 1px solid var(--border);
+  }
+  .accordion-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .accordion-header:hover { background: var(--bg-2); }
+  .accordion-arrow {
+    font-size: 11px;
+    color: var(--text-muted);
+    transition: transform 0.2s;
+  }
+  .accordion-section.open .accordion-arrow {
+    transform: rotate(0deg);
+  }
+  .accordion-section:not(.open) .accordion-arrow {
+    transform: rotate(-90deg);
+  }
+  
+  .accordion-body {
+    padding: 4px 14px 12px;
+  }
+  
+  /* ===== Sliders ===== */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .slider-row:last-child { margin-bottom: 0; }
+  .slider-row label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 90px;
+    flex-shrink: 0;
+  }
+  .adj-slider {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 3px;
+    background: var(--bg-3);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  .adj-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg-1);
+    box-shadow: 0 0 0 1px var(--accent);
+    transition: transform 0.1s;
+  }
+  .adj-slider::-webkit-slider-thumb:hover { transform: scale(1.2); }
+  .adj-slider::-moz-range-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg-1);
+  }
+  .slider-val {
+    font-size: 11px;
+    color: var(--text-muted);
+    min-width: 24px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  
+  /* ===== Responsive ===== */
+  @media (max-width: 900px) {
+    .panel--left { display: none; }
+    .panel--right { width: 200px; }
+  }
+  @media (max-width: 640px) {
+    .panel--right { display: none; }
+    .topbar-filename { display: none; }
+  }
+
+  /* ===== Undo/Redo disabled state ===== */
+.topbar-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+  .topbar-btn:disabled:hover {
+    background: transparent;
+    color: var(--text-secondary);
+  }
+  
+  /* ===== Canvas cursor states ===== */
+  #mainCanvas[style*="grab"]     { cursor: grab !important; }
+  #mainCanvas[style*="grabbing"] { cursor: grabbing !important; }

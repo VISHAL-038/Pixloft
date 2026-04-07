@@ -74,7 +74,11 @@ const imageGrid   = document.getElementById('imageGrid');
 const errorsDiv   = document.getElementById('uploadErrors');
 
 // Click to browse
-uploadInner.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('click', (e) => {
+  if (e.target === uploadZone || uploadZone.contains(e.target)) {
+    fileInput.click();
+  }
+});
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
 // Drag and drop
