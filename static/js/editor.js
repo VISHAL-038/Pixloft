@@ -123,8 +123,15 @@ function redraw() {
   ctx.scale(state.zoom, state.zoom);
 
   // Draw edited image from offscreen
-  const edited = getEditedImageData();
-  ctx.putImageData(edited, 0, 0);
+    //   const edited = getEditedImageData();
+    //   ctx.putImageData(edited, 0, 0);
+    const edited = getEditedImageData();
+    const temp = document.createElement('canvas');
+    temp.width = edited.width;
+    temp.height = edited.height;
+    temp.getContext('2d').putImageData(edited, 0, 0);
+
+    ctx.drawImage(temp, 0, 0);
 
   ctx.restore();
 }
