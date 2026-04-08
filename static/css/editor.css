@@ -346,3 +346,52 @@ body:has(.editor-shell) main {
   /* ===== Canvas cursor states ===== */
   #mainCanvas[style*="grab"]     { cursor: grab !important; }
   #mainCanvas[style*="grabbing"] { cursor: grabbing !important; }
+
+  /* ===== Active slider row highlight ===== */
+.slider-row--active label {
+    color: var(--text-primary);
+  }
+  .slider-row--active .slider-val {
+    color: var(--accent);
+    font-weight: 500;
+  }
+  
+  /* ===== Slider track — override plain bg ===== */
+  .adj-slider {
+    background: var(--bg-3);
+    transition: none; /* track fill set by JS */
+  }
+  .adj-slider:focus {
+    outline: none;
+  }
+  .adj-slider:focus::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(124, 111, 255, 0.35);
+  }
+  
+  /* ===== Value label ===== */
+  .slider-val {
+    font-size: 11px;
+    min-width: 28px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    transition: color 0.15s;
+  }
+  
+  /* ===== Undo/Redo disabled ===== */
+  .topbar-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  
+  /* ===== Histogram labels ===== */
+  .histogram-wrap {
+    position: relative;
+  }
+  .histogram-canvas {
+    display: block;
+    width: 100%;
+    height: 80px;
+    border-radius: var(--radius);
+    background: var(--bg-2);
+  }
