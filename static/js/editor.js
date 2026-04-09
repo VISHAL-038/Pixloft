@@ -28,19 +28,34 @@ const state = {
   historyIndex: -1,
   maxHistory:   40,
   params: {
-    brightness:     0,
-    contrast:       0,
-    exposure:       0,
-    highlights:     0,
-    shadows:        0,
-    saturation:     0,
-    vibrance:       0,
-    temperature:    0,
-    tint:           0,
-    sharpness:      0,
-    noise_reduction:0,
-    vignette:       0,
-    grain:          0,
+    // Light
+    brightness:      0,
+    contrast:        0,
+    exposure:        0,
+    highlights:      0,
+    shadows:         0,
+    // Color
+    saturation:      0,
+    vibrance:        0,
+    temperature:     0,
+    tint:            0,
+    // HSL per-hue (hue/sat/lum for each colour band)
+    hsl: {
+      red:     { hue: 0, sat: 0, lum: 0 },
+      orange:  { hue: 0, sat: 0, lum: 0 },
+      yellow:  { hue: 0, sat: 0, lum: 0 },
+      green:   { hue: 0, sat: 0, lum: 0 },
+      aqua:    { hue: 0, sat: 0, lum: 0 },
+      blue:    { hue: 0, sat: 0, lum: 0 },
+      purple:  { hue: 0, sat: 0, lum: 0 },
+      magenta: { hue: 0, sat: 0, lum: 0 },
+    },
+    // Detail
+    sharpness:       0,
+    noise_reduction: 0,
+    // Effects
+    vignette:        0,
+    grain:           0,
   },
 };
 
@@ -130,12 +145,40 @@ function processPixels(srcData) {
     if (cVal !== 0) v = cFactor * (v - 128) + 128;
     lut[i] = Math.max(0, Math.min(255, v));
   }
+  const hslParams   = state.params.hsl;
+const hasHslEdits = Object.values(hslParams).some(
+  band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
+);
 
   // ── Per-pixel loop ──
   for (let i = 0; i < len; i += 4) {
     let r = lut[data[i]];
     let g = lut[data[i + 1]];
     let b = lut[data[i + 2]];
+
+   // ── HSL per-hue adjustments ──
+const hslParams = state.params.hsl;
+const hasHslEdits = Object.values(hslParams).some(
+  band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
+);
+
+// inside the for loop, before the clamp, add:
+
+    // ── HSL per-hue ──
+    if (hasHslEdits) {
+      const hslResult = applyHslToPixel(r, g, b, hslParams);
+      r = hslResult.r;
+      g = hslResult.g;
+      b = hslResult.b;
+    }
+
+    // ── Vibrance ──
+    if (vibrance !== 0) {
+      const vResult = applyVibrance(r, g, b, p.vibrance);
+      r = vResult.r;
+      g = vResult.g;
+      b = vResult.b;
+    }
 
     // ── Highlights & Shadows ──
     // Luma tells us if pixel is bright or dark
@@ -197,6 +240,139 @@ function processPixels(srcData) {
 
   return new ImageData(data, srcData.width, srcData.height);
 }
+
+// ═══════════════════════════════════════════
+//  HSL COLOUR SPACE HELPERS
+// ═══════════════════════════════════════════
+
+// RGB (0–255) → HSL (h: 0–360, s: 0–1, l: 0–1)
+function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max  = Math.max(r, g, b);
+    const min  = Math.min(r, g, b);
+    const diff = max - min;
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+  
+    if (diff !== 0) {
+      s = diff / (1 - Math.abs(2 * l - 1));
+      switch (max) {
+        case r: h = ((g - b) / diff + (g < b ? 6 : 0)) / 6; break;
+        case g: h = ((b - r) / diff + 2) / 6;               break;
+        case b: h = ((r - g) / diff + 4) / 6;               break;
+      }
+    }
+    return { h: h * 360, s, l };
+  }
+  
+  // HSL → RGB (0–255)
+  function hslToRgb(h, s, l) {
+    h /= 360;
+    if (s === 0) {
+      const v = Math.round(l * 255);
+      return { r: v, g: v, b: v };
+    }
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return {
+      r: Math.round(hue2rgb(p, q, h + 1/3) * 255),
+      g: Math.round(hue2rgb(p, q, h)       * 255),
+      b: Math.round(hue2rgb(p, q, h - 1/3) * 255),
+    };
+  }
+  
+  // Hue range definitions for each colour band
+  // Each band has a centre hue and a soft falloff range
+  const HUE_BANDS = {
+    red:     { center: 0,   range: 30 },
+    orange:  { center: 30,  range: 25 },
+    yellow:  { center: 60,  range: 25 },
+    green:   { center: 120, range: 40 },
+    aqua:    { center: 180, range: 30 },
+    blue:    { center: 220, range: 30 },
+    purple:  { center: 280, range: 30 },
+    magenta: { center: 320, range: 30 },
+  };
+  
+  // How much a pixel's hue belongs to a given band (0–1)
+  // Uses a smooth cosine falloff so edits blend naturally
+  function hueWeight(pixelHue, bandCenter, bandRange) {
+    let diff = Math.abs(pixelHue - bandCenter);
+    if (diff > 180) diff = 360 - diff;  // wrap around 360°
+    if (diff > bandRange) return 0;
+    return Math.cos((diff / bandRange) * (Math.PI / 2));
+  }
+  
+  // Apply HSL per-hue adjustments to one pixel
+  // Returns { r, g, b } with adjustments applied
+  function applyHslToPixel(r, g, b, hslParams) {
+    const { h, s, l } = rgbToHsl(r, g, b);
+  
+    // Skip fully desaturated pixels (no hue to adjust)
+    if (s < 0.02) return { r, g, b };
+  
+    let dHue = 0, dSat = 0, dLum = 0;
+  
+    // Accumulate weighted adjustments from all bands
+    for (const [band, { center, range }] of Object.entries(HUE_BANDS)) {
+      const w = hueWeight(h, center, range);
+      if (w === 0) continue;
+  
+      const adj = hslParams[band];
+      dHue += adj.hue * w;
+      dSat += adj.sat * w;
+      dLum += adj.lum * w;
+    }
+  
+    // Red band wraps — also check near 360°
+    const wRed2 = hueWeight(h, 360, HUE_BANDS.red.range);
+    if (wRed2 > 0) {
+      const adj = hslParams.red;
+      dHue += adj.hue * wRed2;
+      dSat += adj.sat * wRed2;
+      dLum += adj.lum * wRed2;
+    }
+  
+    if (dHue === 0 && dSat === 0 && dLum === 0) return { r, g, b };
+  
+    // Apply shifts (scale to reasonable ranges)
+    const newH = (h + dHue * 1.8 + 360) % 360;  // ±180° max shift
+    const newS = Math.max(0, Math.min(1, s + dSat / 100));
+    const newL = Math.max(0, Math.min(1, l + dLum / 200));
+  
+    return hslToRgb(newH, newS, newL);
+  }
+  
+  // ═══════════════════════════════════════════
+  //  VIBRANCE ENGINE
+  //  Smart saturation that protects skin tones
+  // ═══════════════════════════════════════════
+  function applyVibrance(r, g, b, amount) {
+    if (amount === 0) return { r, g, b };
+  
+    const { h, s, l } = rgbToHsl(r, g, b);
+  
+    // Skin tone detection: hues 0–50° (reds/oranges)
+    // with moderate saturation — boost these less
+    const isSkinTone = h >= 0 && h <= 50 && s > 0.1 && s < 0.8;
+    const skinProtect = isSkinTone ? 0.4 : 1.0;
+  
+    // Vibrance boost is inversely proportional to existing saturation
+    // Already-saturated colours get boosted less
+    const boost = (amount / 100) * (1 - s) * skinProtect;
+  
+    const newS = Math.max(0, Math.min(1, s + boost));
+    const result = hslToRgb(h, newS, l);
+    return result;
+  }
 
 // ═══════════════════════════════════════════
 //  REDRAW
@@ -455,32 +631,29 @@ function initSliderTracks() {
 //  HISTORY — UNDO / REDO
 // ═══════════════════════════════════════════
 function pushHistory() {
-  state.history  = state.history.slice(0, state.historyIndex + 1);
-  state.history.push({ ...state.params });
-  if (state.history.length > state.maxHistory) state.history.shift();
-  state.historyIndex = state.history.length - 1;
-  updateHistoryBtns();
-}
+    state.history = state.history.slice(0, state.historyIndex + 1);
+    // Deep copy including hsl nested object
+    state.history.push({
+      ...state.params,
+      hsl: JSON.parse(JSON.stringify(state.params.hsl)),
+    });
+    if (state.history.length > state.maxHistory) state.history.shift();
+    state.historyIndex = state.history.length - 1;
+    updateHistoryBtns();
+  }
+  
 
-function undo() {
-  if (state.historyIndex <= 0) return;
-  state.historyIndex--;
-  restoreHistory(state.history[state.historyIndex]);
-}
-
-function redo() {
-  if (state.historyIndex >= state.history.length - 1) return;
-  state.historyIndex++;
-  restoreHistory(state.history[state.historyIndex]);
-}
-
-function restoreHistory(params) {
-  state.params = { ...params };
-  syncSliders();
-  redraw();
-  drawHistogram();
-  updateHistoryBtns();
-}
+  function restoreHistory(params) {
+    state.params = {
+      ...params,
+      hsl: JSON.parse(JSON.stringify(params.hsl)),
+    };
+    syncSliders();
+    updateHslDots();
+    redraw();
+    drawHistogram();
+    updateHistoryBtns();
+  }
 
 function syncSliders() {
   document.querySelectorAll('.adj-slider').forEach(slider => {
@@ -644,8 +817,24 @@ function bindTopbar() {
 
   // Reset all
   document.getElementById('btnReset').addEventListener('click', () => {
-    Object.keys(state.params).forEach(k => state.params[k] = 0);
+    Object.keys(state.params).forEach(k => {
+      if (k !== 'hsl') state.params[k] = 0;
+    });
+    // Reset all hsl bands
+    Object.keys(state.params.hsl).forEach(band => {
+      state.params.hsl[band] = { hue: 0, sat: 0, lum: 0 };
+    });
     syncSliders();
+    updateHslDots();
+  
+    // Reset HSL sliders display
+    document.querySelectorAll('.hsl-slider').forEach(s => {
+      s.value = 0;
+      s.nextElementSibling.textContent = '0';
+      s.nextElementSibling.style.color = 'var(--text-muted)';
+      updateSliderTrack(s);
+    });
+  
     redraw();
     drawHistogram();
     pushHistory();

@@ -133,34 +133,92 @@
         </div>
 
         <!-- Color -->
-        <div class="accordion-section">
-          <button class="accordion-header">
-            <span>🎨 Color</span>
-            <span class="accordion-arrow">▾</span>
-          </button>
-          <div class="accordion-body" style="display:none;">
-            <div class="slider-row">
-              <label>Saturation</label>
-              <input type="range" min="-100" max="100" value="0" data-param="saturation" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-            <div class="slider-row">
-              <label>Vibrance</label>
-              <input type="range" min="-100" max="100" value="0" data-param="vibrance" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-            <div class="slider-row">
-              <label>Temperature</label>
-              <input type="range" min="-100" max="100" value="0" data-param="temperature" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-            <div class="slider-row">
-              <label>Tint</label>
-              <input type="range" min="-100" max="100" value="0" data-param="tint" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-          </div>
+<div class="accordion-section">
+    <button class="accordion-header">
+      <span>🎨 Color</span>
+      <span class="accordion-arrow">▾</span>
+    </button>
+    <div class="accordion-body" style="display:none;">
+      <div class="slider-row">
+        <label>Saturation</label>
+        <input type="range" min="-100" max="100" value="0" data-param="saturation" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Vibrance</label>
+        <input type="range" min="-100" max="100" value="0" data-param="vibrance" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Temperature</label>
+        <input type="range" min="-100" max="100" value="0" data-param="temperature" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Tint</label>
+        <input type="range" min="-100" max="100" value="0" data-param="tint" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+    </div>
+  </div>
+  
+  <!-- HSL — Per Colour Range -->
+  <div class="accordion-section">
+    <button class="accordion-header">
+      <span>◉ HSL</span>
+      <span class="accordion-arrow">▾</span>
+    </button>
+    <div class="accordion-body" style="display:none;">
+  
+      <!-- Hue colour tabs -->
+      <div class="hsl-tabs">
+        <button class="hsl-tab active" data-hue="all">All</button>
+        <button class="hsl-tab" data-hue="red"    style="--tc:#ff4444;">R</button>
+        <button class="hsl-tab" data-hue="orange" style="--tc:#ff8c00;">O</button>
+        <button class="hsl-tab" data-hue="yellow" style="--tc:#ffd700;">Y</button>
+        <button class="hsl-tab" data-hue="green"  style="--tc:#44cc44;">G</button>
+        <button class="hsl-tab" data-hue="aqua"   style="--tc:#00cccc;">Aq</button>
+        <button class="hsl-tab" data-hue="blue"   style="--tc:#4488ff;">B</button>
+        <button class="hsl-tab" data-hue="purple" style="--tc:#aa44ff;">P</button>
+        <button class="hsl-tab" data-hue="magenta"style="--tc:#ff44aa;">M</button>
+      </div>
+  
+      <!-- HSL sliders — shown per selected hue -->
+      <div class="hsl-sliders" id="hslSliders">
+        <div class="slider-row">
+          <label>Hue</label>
+          <input type="range" min="-100" max="100" value="0"
+                 class="adj-slider hsl-slider" data-hsl="hue">
+          <span class="slider-val">0</span>
         </div>
+        <div class="slider-row">
+          <label>Saturation</label>
+          <input type="range" min="-100" max="100" value="0"
+                 class="adj-slider hsl-slider" data-hsl="sat">
+          <span class="slider-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Luminance</label>
+          <input type="range" min="-100" max="100" value="0"
+                 class="adj-slider hsl-slider" data-hsl="lum">
+          <span class="slider-val">0</span>
+        </div>
+      </div>
+  
+      <!-- Per-hue dot indicators -->
+      <div class="hsl-dots" id="hslDots">
+        <span class="hsl-dot" data-hue="red"     style="--tc:#ff4444;" title="Red"></span>
+        <span class="hsl-dot" data-hue="orange"  style="--tc:#ff8c00;" title="Orange"></span>
+        <span class="hsl-dot" data-hue="yellow"  style="--tc:#ffd700;" title="Yellow"></span>
+        <span class="hsl-dot" data-hue="green"   style="--tc:#44cc44;" title="Green"></span>
+        <span class="hsl-dot" data-hue="aqua"    style="--tc:#00cccc;" title="Aqua"></span>
+        <span class="hsl-dot" data-hue="blue"    style="--tc:#4488ff;" title="Blue"></span>
+        <span class="hsl-dot" data-hue="purple"  style="--tc:#aa44ff;" title="Purple"></span>
+        <span class="hsl-dot" data-hue="magenta" style="--tc:#ff44aa;" title="Magenta"></span>
+      </div>
+  
+    </div>
+  </div>
 
         <!-- Detail -->
         <div class="accordion-section">
