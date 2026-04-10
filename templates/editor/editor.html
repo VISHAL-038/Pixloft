@@ -39,27 +39,85 @@
 
     <!-- LEFT PANEL — Tools -->
     <aside class="panel panel--left" id="leftPanel">
-      <div class="panel-section">
-        <div class="panel-label">Tools</div>
-        <div class="tool-grid">
-          <button class="tool-btn active" id="toolSelect" data-tool="select" title="Select">
-            <span class="tool-icon">↖</span>
-            <span class="tool-name">Select</span>
-          </button>
-          <button class="tool-btn" id="toolCrop" data-tool="crop" title="Crop">
-            <span class="tool-icon">⊡</span>
-            <span class="tool-name">Crop</span>
-          </button>
-          <button class="tool-btn" id="toolRotate" data-tool="rotate" title="Rotate">
-            <span class="tool-icon">↻</span>
-            <span class="tool-name">Rotate</span>
-          </button>
-          <button class="tool-btn" id="toolFlip" data-tool="flip" title="Flip">
-            <span class="tool-icon">⇔</span>
-            <span class="tool-name">Flip</span>
-          </button>
-        </div>
-      </div>
+        <div class="panel-section">
+            <div class="panel-label">Tools</div>
+            <div class="tool-grid">
+              <button class="tool-btn active" id="toolSelect" data-tool="select" title="Select">
+                <span class="tool-icon">↖</span>
+                <span class="tool-name">Select</span>
+              </button>
+              <button class="tool-btn" id="toolCrop" data-tool="crop" title="Crop (C)">
+                <span class="tool-icon">⊡</span>
+                <span class="tool-name">Crop</span>
+              </button>
+              <button class="tool-btn" id="toolRotate" data-tool="rotate" title="Rotate">
+                <span class="tool-icon">↻</span>
+                <span class="tool-name">Rotate</span>
+              </button>
+              <button class="tool-btn" id="toolFlip" data-tool="flip" title="Flip">
+                <span class="tool-icon">⇔</span>
+                <span class="tool-name">Flip</span>
+              </button>
+            </div>
+          </div>
+          
+          <!-- Crop Controls — shown when crop tool active -->
+          <div class="panel-section" id="cropControls" style="display:none;">
+            <div class="panel-label">Crop</div>
+          
+            <div class="crop-ratios">
+              <button class="crop-ratio active" data-ratio="free">Free</button>
+              <button class="crop-ratio" data-ratio="1:1">1:1</button>
+              <button class="crop-ratio" data-ratio="4:3">4:3</button>
+              <button class="crop-ratio" data-ratio="16:9">16:9</button>
+              <button class="crop-ratio" data-ratio="3:2">3:2</button>
+              <button class="crop-ratio" data-ratio="2:3">2:3</button>
+            </div>
+          
+            <div class="crop-inputs">
+              <div class="crop-input-row">
+                <label>W</label>
+                <input type="number" id="cropW" class="crop-num" min="1" placeholder="px">
+              </div>
+              <div class="crop-input-row">
+                <label>H</label>
+                <input type="number" id="cropH" class="crop-num" min="1" placeholder="px">
+              </div>
+            </div>
+          
+            <div class="crop-actions">
+              <button class="btn btn--primary btn--full" id="btnApplyCrop">Apply Crop</button>
+              <button class="btn btn--ghost btn--full" id="btnCancelCrop"
+                      style="margin-top:6px;">Cancel</button>
+            </div>
+          </div>
+          
+          <!-- Rotate Controls — shown when rotate tool active -->
+          <div class="panel-section" id="rotateControls" style="display:none;">
+            <div class="panel-label">Rotate & Flip</div>
+          
+            <div class="rotate-btns">
+              <button class="rotate-btn" id="btnRotateCCW" title="Rotate 90° left">↺ 90° L</button>
+              <button class="rotate-btn" id="btnRotateCW"  title="Rotate 90° right">↻ 90° R</button>
+            </div>
+          
+            <div class="slider-row" style="margin-top:10px;">
+              <label>Angle</label>
+              <input type="range" min="-45" max="45" value="0"
+                     id="rotateSlider" class="adj-slider">
+              <span class="slider-val" id="rotateVal">0°</span>
+            </div>
+          
+            <div class="rotate-btns" style="margin-top:10px;">
+              <button class="rotate-btn" id="btnFlipH" title="Flip horizontal">⇔ Flip H</button>
+              <button class="rotate-btn" id="btnFlipV" title="Flip vertical">⇕ Flip V</button>
+            </div>
+          
+            <button class="btn btn--ghost btn--full"
+                    id="btnResetTransform" style="margin-top:10px;">
+              Reset Transform
+            </button>
+          </div>
 
       <div class="panel-section">
         <div class="panel-label">Histogram</div>
@@ -133,6 +191,7 @@
         </div>
 
         <!-- Color -->
+<!-- Color -->
 <div class="accordion-section">
     <button class="accordion-header">
       <span>🎨 Color</span>
@@ -149,19 +208,61 @@
         <input type="range" min="-100" max="100" value="0" data-param="vibrance" class="adj-slider">
         <span class="slider-val">0</span>
       </div>
-      <div class="slider-row">
-        <label>Temperature</label>
-        <input type="range" min="-100" max="100" value="0" data-param="temperature" class="adj-slider">
-        <span class="slider-val">0</span>
-      </div>
-      <div class="slider-row">
-        <label>Tint</label>
-        <input type="range" min="-100" max="100" value="0" data-param="tint" class="adj-slider">
-        <span class="slider-val">0</span>
-      </div>
     </div>
   </div>
   
+  <!-- White Balance -->
+  <div class="accordion-section">
+    <button class="accordion-header">
+      <span>⬡ White Balance</span>
+      <span class="accordion-arrow">▾</span>
+    </button>
+    <div class="accordion-body" style="display:none;">
+  
+      <!-- WB Presets -->
+      <div class="wb-presets">
+        <button class="wb-preset" data-temp="0"    data-tint="0">Auto</button>
+        <button class="wb-preset" data-temp="-40"  data-tint="0">Daylight</button>
+        <button class="wb-preset" data-temp="-60"  data-tint="10">Cloudy</button>
+        <button class="wb-preset" data-temp="40"   data-tint="-15">Tungsten</button>
+        <button class="wb-preset" data-temp="-20"  data-tint="-20">Fluorescent</button>
+        <button class="wb-preset" data-temp="20"   data-tint="0">Flash</button>
+      </div>
+  
+      <!-- Temperature gradient bar -->
+      <div class="wb-bar-wrap">
+        <div class="wb-bar wb-bar--temp"></div>
+        <div class="slider-row" style="margin-bottom:4px;">
+          <label>Temp</label>
+          <input type="range" min="-100" max="100" value="0"
+                 data-param="temperature" class="adj-slider wb-slider">
+          <span class="slider-val">0</span>
+        </div>
+      </div>
+  
+      <!-- Tint gradient bar -->
+      <div class="wb-bar-wrap">
+        <div class="wb-bar wb-bar--tint"></div>
+        <div class="slider-row">
+          <label>Tint</label>
+          <input type="range" min="-100" max="100" value="0"
+                 data-param="tint" class="adj-slider wb-slider">
+          <span class="slider-val">0</span>
+        </div>
+      </div>
+  
+      <!-- Colour matrix info -->
+      <div class="wb-matrix" id="wbMatrix">
+        <div class="wb-matrix__title">Colour matrix</div>
+        <div class="wb-matrix__grid" id="wbMatrixGrid">
+          <span class="wm-r">R×1.00</span>
+          <span class="wm-g">G×1.00</span>
+          <span class="wm-b">B×1.00</span>
+        </div>
+      </div>
+  
+    </div>
+  </div>
   <!-- HSL — Per Colour Range -->
   <div class="accordion-section">
     <button class="accordion-header">

@@ -1,11 +1,11 @@
-// ===== Pixloft Editor Engine — Day 6 =====
+// ===== Pixloft Editor Engine — Day 8 =====
 
 // ── DOM refs ──
-const canvas        = document.getElementById('mainCanvas');
-const ctx           = canvas.getContext('2d');
-const canvasArea    = document.getElementById('canvasArea');
-const canvasHint    = document.getElementById('canvasHint');
-const zoomLabel     = document.getElementById('zoomLabel');
+const canvas     = document.getElementById('mainCanvas');
+const ctx        = canvas.getContext('2d');
+const canvasArea = document.getElementById('canvasArea');
+const canvasHint = document.getElementById('canvasHint');
+const zoomLabel  = document.getElementById('zoomLabel');
 
 // ── State ──
 const state = {
@@ -23,7 +23,6 @@ const state = {
   panOriginY:   0,
   spaceHeld:    false,
   activeTool:   'select',
-  dirty:        false,   // needs redraw
   history:      [],
   historyIndex: -1,
   maxHistory:   40,
@@ -39,7 +38,7 @@ const state = {
     vibrance:        0,
     temperature:     0,
     tint:            0,
-    // HSL per-hue (hue/sat/lum for each colour band)
+    // HSL per-hue
     hsl: {
       red:     { hue: 0, sat: 0, lum: 0 },
       orange:  { hue: 0, sat: 0, lum: 0 },
@@ -63,8 +62,11 @@ const state = {
 let offscreen    = null;
 let offscreenCtx = null;
 
-// ── Debounce timer for heavy ops ──
+// ── Debounce timer ──
 let redrawTimer = null;
+
+// ── Active HSL band ──
+let activeHueBand = 'all';
 
 // ═══════════════════════════════════════════
 //  INIT
@@ -73,10 +75,12 @@ function init() {
   loadImage(IMAGE_URL);
   bindCanvasEvents();
   bindSliders();
+  bindHslTabs();
   bindTools();
   bindAccordion();
   bindTopbar();
   bindKeyboard();
+  bindWhiteBalance();
 }
 
 // ═══════════════════════════════════════════
@@ -85,14 +89,13 @@ function init() {
 function loadImage(src) {
   showHint('Loading image...');
 
-  const img      = new Image();
+  const img       = new Image();
   img.crossOrigin = 'anonymous';
 
   img.onload = () => {
     state.originalImage = img;
     state.imageLoaded   = true;
 
-    // Offscreen = permanent store of original pixels
     offscreen        = document.createElement('canvas');
     offscreen.width  = img.naturalWidth;
     offscreen.height = img.naturalHeight;
@@ -108,8 +111,263 @@ function loadImage(src) {
   };
 
   img.onerror = () => showHint('⚠ Failed to load image');
-  img.src      = src;
+  img.src     = src;
 }
+
+// ═══════════════════════════════════════════
+//  HSL COLOUR SPACE HELPERS
+// ═══════════════════════════════════════════
+
+// RGB (0–255) → HSL (h: 0–360, s: 0–1, l: 0–1)
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max  = Math.max(r, g, b);
+  const min  = Math.min(r, g, b);
+  const diff = max - min;
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+
+  if (diff !== 0) {
+    s = diff / (1 - Math.abs(2 * l - 1));
+    switch (max) {
+      case r: h = ((g - b) / diff + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / diff + 2) / 6;               break;
+      case b: h = ((r - g) / diff + 4) / 6;               break;
+    }
+  }
+  return { h: h * 360, s, l };
+}
+
+// HSL → RGB (0–255)
+function hslToRgb(h, s, l) {
+  h /= 360;
+  if (s === 0) {
+    const v = Math.round(l * 255);
+    return { r: v, g: v, b: v };
+  }
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r: Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+    g: Math.round(hue2rgb(p, q, h)         * 255),
+    b: Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
+  };
+}
+
+// Hue band definitions — center hue and falloff range in degrees
+const HUE_BANDS = {
+  red:     { center: 0,   range: 30 },
+  orange:  { center: 30,  range: 25 },
+  yellow:  { center: 60,  range: 25 },
+  green:   { center: 120, range: 40 },
+  aqua:    { center: 180, range: 30 },
+  blue:    { center: 220, range: 30 },
+  purple:  { center: 280, range: 30 },
+  magenta: { center: 320, range: 30 },
+};
+
+// How much a pixel belongs to a band — smooth cosine falloff (0–1)
+function hueWeight(pixelHue, bandCenter, bandRange) {
+  let diff = Math.abs(pixelHue - bandCenter);
+  if (diff > 180) diff = 360 - diff; // wrap around 360°
+  if (diff > bandRange) return 0;
+  return Math.cos((diff / bandRange) * (Math.PI / 2));
+}
+
+// Apply per-hue HSL adjustments to a single pixel
+function applyHslToPixel(r, g, b, hslParams) {
+  const { h, s, l } = rgbToHsl(r, g, b);
+
+  // Skip fully desaturated pixels — no hue to adjust
+  if (s < 0.02) return { r, g, b };
+
+  let dHue = 0, dSat = 0, dLum = 0;
+
+  // Accumulate weighted contributions from each band
+  for (const [band, { center, range }] of Object.entries(HUE_BANDS)) {
+    const w = hueWeight(h, center, range);
+    if (w === 0) continue;
+    const adj = hslParams[band];
+    dHue += adj.hue * w;
+    dSat += adj.sat * w;
+    dLum += adj.lum * w;
+  }
+
+  // Red band also wraps near 360°
+  const wRed2 = hueWeight(h, 360, HUE_BANDS.red.range);
+  if (wRed2 > 0) {
+    dHue += hslParams.red.hue * wRed2;
+    dSat += hslParams.red.sat * wRed2;
+    dLum += hslParams.red.lum * wRed2;
+  }
+
+  if (dHue === 0 && dSat === 0 && dLum === 0) return { r, g, b };
+
+  const newH = (h + dHue * 1.8 + 360) % 360;
+  const newS = Math.max(0, Math.min(1, s + dSat / 100));
+  const newL = Math.max(0, Math.min(1, l + dLum / 200));
+
+  return hslToRgb(newH, newS, newL);
+}
+
+// Vibrance — smart saturation that protects skin tones
+function applyVibrance(r, g, b, amount) {
+  if (amount === 0) return { r, g, b };
+
+  const { h, s, l } = rgbToHsl(r, g, b);
+
+  // Skin tone hues (0–50°) with moderate saturation get less boost
+  const isSkinTone  = h >= 0 && h <= 50 && s > 0.1 && s < 0.8;
+  const skinProtect = isSkinTone ? 0.4 : 1.0;
+
+  // Less boost for already-saturated pixels
+  const boost = (amount / 100) * (1 - s) * skinProtect;
+  const newS  = Math.max(0, Math.min(1, s + boost));
+
+  return hslToRgb(h, newS, l);
+}
+
+// ═══════════════════════════════════════════
+//  WHITE BALANCE ENGINE
+//  Based on a physics-derived colour temperature
+//  curve (Planckian locus approximation)
+// ═══════════════════════════════════════════
+
+// Convert slider value (−100…+100) to Kelvin (2000K…12000K)
+// Center (0) = 6500K (daylight)
+function sliderToKelvin(value) {
+    // Exponential mapping so steps feel perceptually even
+    if (value >= 0) {
+      return 6500 + value * 55; // 6500K → 12000K
+    } else {
+      return 6500 + value * 45; // 6500K → 2000K
+    }
+  }
+  
+  // Planckian locus — compute R/G/B multipliers for a given colour
+  // temperature in Kelvin. Based on Tanner Helland's algorithm.
+  function kelvinToRgbMultipliers(kelvin) {
+    const temp = kelvin / 100;
+    let r, g, b;
+  
+    // ── Red ──
+    if (temp <= 66) {
+      r = 1.0;
+    } else {
+      r = 329.698727446 * Math.pow(temp - 60, -0.1332047592) / 255;
+      r = Math.max(0, Math.min(1, r));
+    }
+  
+    // ── Green ──
+    if (temp <= 66) {
+      g = (99.4708025861 * Math.log(temp) - 161.1195681661) / 255;
+    } else {
+      g = 288.1221695283 * Math.pow(temp - 60, -0.0755148492) / 255;
+    }
+    g = Math.max(0, Math.min(1, g));
+  
+    // ── Blue ──
+    if (temp >= 66) {
+      b = 1.0;
+    } else if (temp <= 19) {
+      b = 0.0;
+    } else {
+      b = (138.5177312231 * Math.log(temp - 10) - 305.0447927307) / 255;
+      b = Math.max(0, Math.min(1, b));
+    }
+  
+    return { r, g, b };
+  }
+  
+  // Build a 3×3 colour correction matrix from temperature + tint
+  // Returns multipliers for R, G, B channels
+  function buildWbMatrix(temperature, tint) {
+    if (temperature === 0 && tint === 0) {
+      return { r: 1, g: 1, b: 1, label: { r: '1.00', g: '1.00', b: '1.00' } };
+    }
+  
+    const kelvin = sliderToKelvin(temperature);
+  
+    // Get the RGB curve for this colour temperature
+    const curve6500 = kelvinToRgbMultipliers(6500); // neutral reference
+    const curveTgt  = kelvinToRgbMultipliers(kelvin);
+  
+    // Normalise against the neutral reference so 6500K = 1.0
+    let rMul = curveTgt.r / curve6500.r;
+    let gMul = curveTgt.g / curve6500.g;
+    let bMul = curveTgt.b / curve6500.b;
+  
+    // Tint shifts green vs magenta
+    // Positive tint = more green, negative = more magenta
+    const tintShift = tint / 100 * 0.25;
+    gMul += tintShift;
+    rMul -= tintShift * 0.5;
+    bMul -= tintShift * 0.5;
+  
+    // Normalise so the average multiplier stays near 1
+    // (prevents overall brightness change from WB)
+    const avg = (rMul + gMul + bMul) / 3;
+    rMul /= avg;
+    gMul /= avg;
+    bMul /= avg;
+  
+    return {
+      r: rMul,
+      g: gMul,
+      b: bMul,
+      label: {
+        r: rMul.toFixed(2),
+        g: gMul.toFixed(2),
+        b: bMul.toFixed(2),
+      },
+    };
+  }
+  
+  // Apply WB matrix to a single pixel — fast multiply
+  function applyWbMatrix(r, g, b, matrix) {
+    return {
+      r: Math.max(0, Math.min(255, r * matrix.r)),
+      g: Math.max(0, Math.min(255, g * matrix.g)),
+      b: Math.max(0, Math.min(255, b * matrix.b)),
+    };
+  }
+  
+  // Update the matrix readout in the UI
+  function updateWbMatrixDisplay(matrix) {
+    const grid = document.getElementById('wbMatrixGrid');
+    if (!grid) return;
+  
+    const rEl = grid.querySelector('.wm-r');
+    const gEl = grid.querySelector('.wm-g');
+    const bEl = grid.querySelector('.wm-b');
+  
+    if (rEl) {
+      rEl.textContent = `R×${matrix.label.r}`;
+      rEl.style.color = matrix.r > 1.01 ? '#ff8080'
+                      : matrix.r < 0.99 ? '#8080ff'
+                      : 'var(--text-muted)';
+    }
+    if (gEl) {
+      gEl.textContent = `G×${matrix.label.g}`;
+      gEl.style.color = matrix.g > 1.01 ? '#80cc80'
+                      : matrix.g < 0.99 ? '#cc80cc'
+                      : 'var(--text-muted)';
+    }
+    if (bEl) {
+      bEl.textContent = `B×${matrix.label.b}`;
+      bEl.style.color = matrix.b > 1.01 ? '#80aaff'
+                      : matrix.b < 0.99 ? '#ffaa80'
+                      : 'var(--text-muted)';
+    }
+  }
 
 // ═══════════════════════════════════════════
 //  PIXEL PROCESSING — CORE ENGINE
@@ -119,97 +377,66 @@ function processPixels(srcData) {
   const data = new Uint8ClampedArray(srcData.data);
   const len  = data.length;
 
-  // ── Pre-compute constants ──
-  const brightness  = p.brightness  * 0.8;           // −80 … +80
-  const exposure    = p.exposure    * 1.0;            // −100 … +100
-  const saturation  = p.saturation  / 100;            // −1 … +1
-  const vibrance    = p.vibrance    / 100;            // −1 … +1
-  const temperature = p.temperature * 0.3;            // −30 … +30
-  const tint        = p.tint        * 0.2;            // −20 … +20
-  const highlights  = p.highlights  * 0.6;            // −60 … +60
-  const shadows     = p.shadows     * 0.6;            // −60 … +60
+  // Pre-compute scaled values
+  const brightness  = p.brightness * 0.8;   // ±80
+  const exposure    = p.exposure   * 1.0;   // ±100
+  const saturation  = p.saturation / 100;   // ±1
+  const highlights  = p.highlights  * 0.6;  // ±60
+  const shadows     = p.shadows     * 0.6;  // ±60
 
-  // Contrast uses the photographic S-curve formula
+  // Contrast — photographic S-curve formula
   const cVal    = p.contrast;
   const cFactor = cVal !== 0
     ? (259 * (cVal + 255)) / (255 * (259 - cVal))
     : 1;
 
-  // Build a LUT (Look-Up Table) for brightness + contrast + exposure
-  // LUTs are much faster than per-pixel calculations for simple ops
+  // LUT for brightness + exposure + contrast (fast path)
   const lut = new Uint8ClampedArray(256);
   for (let i = 0; i < 256; i++) {
-    let v = i;
-    v += exposure;
-    v += brightness;
+    let v = i + exposure + brightness;
     if (cVal !== 0) v = cFactor * (v - 128) + 128;
     lut[i] = Math.max(0, Math.min(255, v));
   }
-  const hslParams   = state.params.hsl;
-const hasHslEdits = Object.values(hslParams).some(
-  band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
-);
+
+  // Check if any HSL band has edits — skip expensive HSL loop if not
+  const hslParams   = p.hsl;
+  const hasHslEdits = Object.values(hslParams).some(
+    band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
+  );
 
   // ── Per-pixel loop ──
   for (let i = 0; i < len; i += 4) {
+    // Apply LUT (brightness + exposure + contrast)
     let r = lut[data[i]];
     let g = lut[data[i + 1]];
     let b = lut[data[i + 2]];
 
-   // ── HSL per-hue adjustments ──
-const hslParams = state.params.hsl;
-const hasHslEdits = Object.values(hslParams).some(
-  band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
-);
-
-// inside the for loop, before the clamp, add:
-
-    // ── HSL per-hue ──
-    if (hasHslEdits) {
-      const hslResult = applyHslToPixel(r, g, b, hslParams);
-      r = hslResult.r;
-      g = hslResult.g;
-      b = hslResult.b;
-    }
-
-    // ── Vibrance ──
-    if (vibrance !== 0) {
-      const vResult = applyVibrance(r, g, b, p.vibrance);
-      r = vResult.r;
-      g = vResult.g;
-      b = vResult.b;
-    }
-
-    // ── Highlights & Shadows ──
-    // Luma tells us if pixel is bright or dark
+    // Luma for highlights/shadows weighting
     const luma = 0.299 * r + 0.587 * g + 0.114 * b;
 
+    // Highlights — only affect bright pixels
     if (highlights !== 0) {
-      // Highlights only affect bright pixels (luma > 128)
-      const hWeight = Math.max(0, (luma - 128) / 127);
-      r += highlights * hWeight;
-      g += highlights * hWeight;
-      b += highlights * hWeight;
+      const w = Math.max(0, (luma - 128) / 127);
+      r += highlights * w;
+      g += highlights * w;
+      b += highlights * w;
     }
 
+    // Shadows — only affect dark pixels
     if (shadows !== 0) {
-      // Shadows only affect dark pixels (luma < 128)
-      const sWeight = Math.max(0, (128 - luma) / 128);
-      r += shadows * sWeight;
-      g += shadows * sWeight;
-      b += shadows * sWeight;
+      const w = Math.max(0, (128 - luma) / 128);
+      r += shadows * w;
+      g += shadows * w;
+      b += shadows * w;
     }
 
-    // ── White Balance ──
-    if (temperature !== 0) {
-      r += temperature;    // warm = more red
-      b -= temperature;    // warm = less blue
-    }
-    if (tint !== 0) {
-      g += tint;           // tint shifts green channel
-    }
+// White balance — colour matrix transform
+if (state._wbMatrix && (p.temperature !== 0 || p.tint !== 0)) {
+    const wb = applyWbMatrix(r, g, b, state._wbMatrix);
+    r = wb.r; g = wb.g; b = wb.b;
+  }
 
-    // ── Saturation ──
+    // Global saturation
     if (saturation !== 0) {
       const grey = 0.299 * r + 0.587 * g + 0.114 * b;
       r = grey + (r - grey) * (1 + saturation);
@@ -217,162 +444,27 @@ const hasHslEdits = Object.values(hslParams).some(
       b = grey + (b - grey) * (1 + saturation);
     }
 
-    // ── Vibrance ──
-    // Vibrance is "smart saturation" — boosts dull colours
-    // more than already-saturated ones, and protects skin tones
-    if (vibrance !== 0) {
-      const maxC  = Math.max(r, g, b);
-      const minC  = Math.min(r, g, b);
-      const sat   = maxC === 0 ? 0 : (maxC - minC) / maxC;
-      const boost = vibrance * (1 - sat);   // less boost for already-saturated
-      const grey2 = 0.299 * r + 0.587 * g + 0.114 * b;
-      r = grey2 + (r - grey2) * (1 + boost);
-      g = grey2 + (g - grey2) * (1 + boost);
-      b = grey2 + (b - grey2) * (1 + boost);
+    // Per-hue HSL adjustments
+    if (hasHslEdits) {
+      const res = applyHslToPixel(r, g, b, hslParams);
+      r = res.r; g = res.g; b = res.b;
     }
 
-    // ── Clamp to 0–255 ──
+    // Vibrance — smart saturation
+    if (p.vibrance !== 0) {
+      const res = applyVibrance(r, g, b, p.vibrance);
+      r = res.r; g = res.g; b = res.b;
+    }
+
+    // Clamp 0–255
     data[i]     = Math.max(0, Math.min(255, r));
     data[i + 1] = Math.max(0, Math.min(255, g));
     data[i + 2] = Math.max(0, Math.min(255, b));
-    // data[i + 3] = alpha, untouched
+    // alpha (data[i+3]) untouched
   }
 
   return new ImageData(data, srcData.width, srcData.height);
 }
-
-// ═══════════════════════════════════════════
-//  HSL COLOUR SPACE HELPERS
-// ═══════════════════════════════════════════
-
-// RGB (0–255) → HSL (h: 0–360, s: 0–1, l: 0–1)
-function rgbToHsl(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max  = Math.max(r, g, b);
-    const min  = Math.min(r, g, b);
-    const diff = max - min;
-    let h = 0, s = 0;
-    const l = (max + min) / 2;
-  
-    if (diff !== 0) {
-      s = diff / (1 - Math.abs(2 * l - 1));
-      switch (max) {
-        case r: h = ((g - b) / diff + (g < b ? 6 : 0)) / 6; break;
-        case g: h = ((b - r) / diff + 2) / 6;               break;
-        case b: h = ((r - g) / diff + 4) / 6;               break;
-      }
-    }
-    return { h: h * 360, s, l };
-  }
-  
-  // HSL → RGB (0–255)
-  function hslToRgb(h, s, l) {
-    h /= 360;
-    if (s === 0) {
-      const v = Math.round(l * 255);
-      return { r: v, g: v, b: v };
-    }
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1/6) return p + (q - p) * 6 * t;
-      if (t < 1/2) return q;
-      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-      return p;
-    };
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    return {
-      r: Math.round(hue2rgb(p, q, h + 1/3) * 255),
-      g: Math.round(hue2rgb(p, q, h)       * 255),
-      b: Math.round(hue2rgb(p, q, h - 1/3) * 255),
-    };
-  }
-  
-  // Hue range definitions for each colour band
-  // Each band has a centre hue and a soft falloff range
-  const HUE_BANDS = {
-    red:     { center: 0,   range: 30 },
-    orange:  { center: 30,  range: 25 },
-    yellow:  { center: 60,  range: 25 },
-    green:   { center: 120, range: 40 },
-    aqua:    { center: 180, range: 30 },
-    blue:    { center: 220, range: 30 },
-    purple:  { center: 280, range: 30 },
-    magenta: { center: 320, range: 30 },
-  };
-  
-  // How much a pixel's hue belongs to a given band (0–1)
-  // Uses a smooth cosine falloff so edits blend naturally
-  function hueWeight(pixelHue, bandCenter, bandRange) {
-    let diff = Math.abs(pixelHue - bandCenter);
-    if (diff > 180) diff = 360 - diff;  // wrap around 360°
-    if (diff > bandRange) return 0;
-    return Math.cos((diff / bandRange) * (Math.PI / 2));
-  }
-  
-  // Apply HSL per-hue adjustments to one pixel
-  // Returns { r, g, b } with adjustments applied
-  function applyHslToPixel(r, g, b, hslParams) {
-    const { h, s, l } = rgbToHsl(r, g, b);
-  
-    // Skip fully desaturated pixels (no hue to adjust)
-    if (s < 0.02) return { r, g, b };
-  
-    let dHue = 0, dSat = 0, dLum = 0;
-  
-    // Accumulate weighted adjustments from all bands
-    for (const [band, { center, range }] of Object.entries(HUE_BANDS)) {
-      const w = hueWeight(h, center, range);
-      if (w === 0) continue;
-  
-      const adj = hslParams[band];
-      dHue += adj.hue * w;
-      dSat += adj.sat * w;
-      dLum += adj.lum * w;
-    }
-  
-    // Red band wraps — also check near 360°
-    const wRed2 = hueWeight(h, 360, HUE_BANDS.red.range);
-    if (wRed2 > 0) {
-      const adj = hslParams.red;
-      dHue += adj.hue * wRed2;
-      dSat += adj.sat * wRed2;
-      dLum += adj.lum * wRed2;
-    }
-  
-    if (dHue === 0 && dSat === 0 && dLum === 0) return { r, g, b };
-  
-    // Apply shifts (scale to reasonable ranges)
-    const newH = (h + dHue * 1.8 + 360) % 360;  // ±180° max shift
-    const newS = Math.max(0, Math.min(1, s + dSat / 100));
-    const newL = Math.max(0, Math.min(1, l + dLum / 200));
-  
-    return hslToRgb(newH, newS, newL);
-  }
-  
-  // ═══════════════════════════════════════════
-  //  VIBRANCE ENGINE
-  //  Smart saturation that protects skin tones
-  // ═══════════════════════════════════════════
-  function applyVibrance(r, g, b, amount) {
-    if (amount === 0) return { r, g, b };
-  
-    const { h, s, l } = rgbToHsl(r, g, b);
-  
-    // Skin tone detection: hues 0–50° (reds/oranges)
-    // with moderate saturation — boost these less
-    const isSkinTone = h >= 0 && h <= 50 && s > 0.1 && s < 0.8;
-    const skinProtect = isSkinTone ? 0.4 : 1.0;
-  
-    // Vibrance boost is inversely proportional to existing saturation
-    // Already-saturated colours get boosted less
-    const boost = (amount / 100) * (1 - s) * skinProtect;
-  
-    const newS = Math.max(0, Math.min(1, s + boost));
-    const result = hslToRgb(h, newS, l);
-    return result;
-  }
 
 // ═══════════════════════════════════════════
 //  REDRAW
@@ -380,52 +472,46 @@ function rgbToHsl(r, g, b) {
 function redraw() {
   if (!state.imageLoaded) return;
 
+  // Pre-compute WB matrix once per redraw (not per pixel)
+  state._wbMatrix = buildWbMatrix(state.params.temperature, state.params.tint);
+  updateWbMatrixDisplay(state._wbMatrix);
+
   const area    = canvasArea.getBoundingClientRect();
   canvas.width  = area.width;
   canvas.height = area.height;
 
-  // Draw checkerboard background
   drawCheckerboard();
 
-  // Apply zoom + pan transform
   ctx.save();
   ctx.translate(state.offsetX, state.offsetY);
   ctx.scale(state.zoom, state.zoom);
 
-  // Get original pixels, process them, draw
-  const srcData = offscreenCtx.getImageData(
-    0, 0, offscreen.width, offscreen.height
-  );
-  // temp canvas for processed image
-if (!state._processedCanvas) {
-    state._processedCanvas = document.createElement('canvas');
-    state._processedCtx = state._processedCanvas.getContext('2d');
-  }
-  
-  state._processedCanvas.width  = offscreen.width;
-  state._processedCanvas.height = offscreen.height;
-  
+  // Process pixels then draw via temp canvas (so zoom/pan works correctly)
+  const srcData   = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
   const processed = processPixels(srcData);
-  state._processedCtx.putImageData(processed, 0, 0);
-  
-  // draw using drawImage (respects zoom/pan)
-  ctx.drawImage(state._processedCanvas, 0, 0);
+
+  if (!state._tmpCanvas) {
+    state._tmpCanvas    = document.createElement('canvas');
+    state._tmpCtx       = state._tmpCanvas.getContext('2d');
+  }
+  state._tmpCanvas.width  = offscreen.width;
+  state._tmpCanvas.height = offscreen.height;
+  state._tmpCtx.putImageData(processed, 0, 0);
+  ctx.drawImage(state._tmpCanvas, 0, 0);
 
   ctx.restore();
 }
 
-// Debounced redraw — prevents janking during rapid slider input
 function scheduleRedraw() {
   clearTimeout(redrawTimer);
-  redrawTimer = setTimeout(redraw, 8); // ~120fps cap
+  redrawTimer = setTimeout(redraw, 8);
 }
 
 function drawCheckerboard() {
   const size = 14;
   for (let y = 0; y < canvas.height; y += size) {
     for (let x = 0; x < canvas.width; x += size) {
-      ctx.fillStyle = ((x / size + y / size) % 2 === 0)
-        ? '#1a1a1e' : '#141418';
+      ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#1a1a1e' : '#141418';
       ctx.fillRect(x, y, size, size);
     }
   }
@@ -473,14 +559,13 @@ function drawHistogram() {
 
 function _drawHistogram() {
   if (!state.imageLoaded) return;
-
   const hCanvas = document.getElementById('histogramCanvas');
   if (!hCanvas) return;
-  const hCtx = hCanvas.getContext('2d');
-  const w = hCanvas.width;
-  const h = hCanvas.height;
 
-  // Sample from processed pixels
+  const hCtx = hCanvas.getContext('2d');
+  const w    = hCanvas.width;
+  const h    = hCanvas.height;
+
   const srcData   = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
   const processed = processPixels(srcData);
   const data      = processed.data;
@@ -488,7 +573,7 @@ function _drawHistogram() {
   const rBins = new Uint32Array(256);
   const gBins = new Uint32Array(256);
   const bBins = new Uint32Array(256);
-  const lBins = new Uint32Array(256); // luminance
+  const lBins = new Uint32Array(256);
 
   // Sample every 4th pixel for speed
   for (let i = 0; i < data.length; i += 16) {
@@ -505,7 +590,6 @@ function _drawHistogram() {
 
   hCtx.clearRect(0, 0, w, h);
 
-  // Draw luminance first (behind), then RGB
   [
     [lBins, 'rgba(255,255,255,0.12)'],
     [rBins, 'rgba(255, 75, 75, 0.5)'],
@@ -513,69 +597,52 @@ function _drawHistogram() {
     [bBins, 'rgba(75, 130, 255, 0.5)'],
   ].forEach(([bins, color]) => {
     hCtx.beginPath();
-    hCtx.moveTo(0, h);
     for (let i = 0; i < 256; i++) {
       const x = (i / 255) * w;
       const y = h - (bins[i] / max) * (h - 2);
       i === 0 ? hCtx.moveTo(x, y) : hCtx.lineTo(x, y);
     }
     hCtx.lineTo(w, h);
+    hCtx.lineTo(0, h);
     hCtx.closePath();
     hCtx.fillStyle = color;
     hCtx.fill();
   });
-
-  // Clipping indicator lines
-  hCtx.strokeStyle = 'rgba(255,255,255,0.08)';
-  hCtx.lineWidth   = 0.5;
-  hCtx.beginPath();
-  hCtx.moveTo(0, 0); hCtx.lineTo(w, 0);
-  hCtx.moveTo(0, h); hCtx.lineTo(w, h);
-  hCtx.stroke();
 }
 
 // ═══════════════════════════════════════════
-//  SLIDER BINDING
+//  SLIDER BINDING — regular adjustment sliders
 // ═══════════════════════════════════════════
 function bindSliders() {
-  document.querySelectorAll('.adj-slider').forEach(slider => {
-    const valEl   = slider.nextElementSibling;
-    const row     = slider.closest('.slider-row');
+  document.querySelectorAll('.adj-slider:not(.hsl-slider)').forEach(slider => {
+    const valEl = slider.nextElementSibling;
+    const row   = slider.closest('.slider-row');
 
-    // Update value display and track fill on every move
     slider.addEventListener('input', () => {
       const param = slider.dataset.param;
       const value = parseInt(slider.value);
       state.params[param] = value;
 
-      // Update value label
-      valEl.textContent  = value > 0 ? `+${value}` : `${value}`;
-      valEl.style.color  = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
-
-      // Highlight active row
+      valEl.textContent = value > 0 ? `+${value}` : `${value}`;
+      valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
       row.classList.toggle('slider-row--active', value !== 0);
-
-      // Update slider track fill
       updateSliderTrack(slider);
-
-      // Redraw canvas
       scheduleRedraw();
       drawHistogram();
     });
 
-    // Push to history when user finishes dragging
     slider.addEventListener('change', pushHistory);
 
-    // Double-click label to reset that slider
+    // Double-click label resets this slider
     const label = row.querySelector('label');
     if (label) {
       label.style.cursor = 'pointer';
       label.title        = 'Double-click to reset';
       label.addEventListener('dblclick', () => {
-        slider.value            = 0;
+        slider.value = 0;
         state.params[slider.dataset.param] = 0;
-        valEl.textContent       = '0';
-        valEl.style.color       = 'var(--text-muted)';
+        valEl.textContent = '0';
+        valEl.style.color = 'var(--text-muted)';
         row.classList.remove('slider-row--active');
         updateSliderTrack(slider);
         scheduleRedraw();
@@ -586,16 +653,14 @@ function bindSliders() {
   });
 }
 
-// Fills slider track from center (for −100…+100 sliders)
-// and from left (for 0…100 sliders)
+// ── Slider track fill ──
 function updateSliderTrack(slider) {
   const min = parseInt(slider.min);
   const max = parseInt(slider.max);
   const val = parseInt(slider.value);
 
-  let pct;
   if (min < 0) {
-    // Bidirectional slider — fill from center
+    // Bidirectional — fill from center
     const center = (0 - min) / (max - min) * 100;
     const pos    = (val - min) / (max - min) * 100;
     const left   = Math.min(center, pos);
@@ -610,8 +675,8 @@ function updateSliderTrack(slider) {
       var(--bg-3) 100%
     )`;
   } else {
-    // Unidirectional slider — fill from left
-    pct = (val / max) * 100;
+    // Unidirectional — fill from left
+    const pct = (val / max) * 100;
     slider.style.background = `linear-gradient(
       to right,
       var(--accent) 0%,
@@ -622,41 +687,155 @@ function updateSliderTrack(slider) {
   }
 }
 
-// Init all slider tracks on load
 function initSliderTracks() {
   document.querySelectorAll('.adj-slider').forEach(updateSliderTrack);
+}
+
+// ═══════════════════════════════════════════
+//  HSL TAB BINDING
+// ═══════════════════════════════════════════
+function bindHslTabs() {
+  const tabs    = document.querySelectorAll('.hsl-tab');
+  const sliders = document.querySelectorAll('.hsl-slider');
+
+  // Tab click — switch active band and load its values into sliders
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      activeHueBand = tab.dataset.hue;
+
+      if (activeHueBand === 'all') {
+        // Show zeros for "All" view
+        sliders.forEach(s => {
+          s.value = 0;
+          const valEl       = s.nextElementSibling;
+          valEl.textContent = '0';
+          valEl.style.color = 'var(--text-muted)';
+          updateSliderTrack(s);
+        });
+      } else {
+        // Load this band's current values
+        const band = state.params.hsl[activeHueBand];
+        sliders.forEach(s => {
+          const key   = s.dataset.hsl;
+          const value = band[key];
+          s.value                   = value;
+          s.nextElementSibling.textContent = value > 0 ? `+${value}` : `${value}`;
+          s.nextElementSibling.style.color = value !== 0
+            ? 'var(--accent)' : 'var(--text-muted)';
+          updateSliderTrack(s);
+        });
+      }
+    });
+  });
+
+  // HSL slider input
+  sliders.forEach(slider => {
+    const valEl = slider.nextElementSibling;
+
+    slider.addEventListener('input', () => {
+      const key   = slider.dataset.hsl;
+      const value = parseInt(slider.value);
+
+      if (activeHueBand === 'all') {
+        // Apply to all 8 bands equally
+        Object.keys(state.params.hsl).forEach(band => {
+          state.params.hsl[band][key] = value;
+        });
+      } else {
+        state.params.hsl[activeHueBand][key] = value;
+      }
+
+      valEl.textContent = value > 0 ? `+${value}` : `${value}`;
+      valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
+      updateSliderTrack(slider);
+      updateHslDots();
+      scheduleRedraw();
+      drawHistogram();
+    });
+
+    slider.addEventListener('change', pushHistory);
+
+    // Double-click label resets this HSL slider
+    const label = slider.closest('.slider-row')?.querySelector('label');
+    if (label) {
+      label.style.cursor = 'pointer';
+      label.title        = 'Double-click to reset';
+      label.addEventListener('dblclick', () => {
+        const key = slider.dataset.hsl;
+        slider.value              = 0;
+        valEl.textContent         = '0';
+        valEl.style.color         = 'var(--text-muted)';
+
+        if (activeHueBand === 'all') {
+          Object.keys(state.params.hsl).forEach(b => {
+            state.params.hsl[b][key] = 0;
+          });
+        } else {
+          state.params.hsl[activeHueBand][key] = 0;
+        }
+
+        updateSliderTrack(slider);
+        updateHslDots();
+        scheduleRedraw();
+        drawHistogram();
+        pushHistory();
+      });
+    }
+  });
+}
+
+// Light up a coloured dot when a band has any non-zero edit
+function updateHslDots() {
+  document.querySelectorAll('.hsl-dot').forEach(dot => {
+    const band   = dot.dataset.hue;
+    const p      = state.params.hsl[band];
+    const active = p.hue !== 0 || p.sat !== 0 || p.lum !== 0;
+    dot.classList.toggle('hsl-dot--active', active);
+  });
 }
 
 // ═══════════════════════════════════════════
 //  HISTORY — UNDO / REDO
 // ═══════════════════════════════════════════
 function pushHistory() {
-    state.history = state.history.slice(0, state.historyIndex + 1);
-    // Deep copy including hsl nested object
-    state.history.push({
-      ...state.params,
-      hsl: JSON.parse(JSON.stringify(state.params.hsl)),
-    });
-    if (state.history.length > state.maxHistory) state.history.shift();
-    state.historyIndex = state.history.length - 1;
-    updateHistoryBtns();
-  }
-  
+  state.history = state.history.slice(0, state.historyIndex + 1);
+  state.history.push({
+    ...state.params,
+    hsl: JSON.parse(JSON.stringify(state.params.hsl)),
+  });
+  if (state.history.length > state.maxHistory) state.history.shift();
+  state.historyIndex = state.history.length - 1;
+  updateHistoryBtns();
+}
 
-  function restoreHistory(params) {
-    state.params = {
-      ...params,
-      hsl: JSON.parse(JSON.stringify(params.hsl)),
-    };
-    syncSliders();
-    updateHslDots();
-    redraw();
-    drawHistogram();
-    updateHistoryBtns();
-  }
+function undo() {
+  if (state.historyIndex <= 0) return;
+  state.historyIndex--;
+  restoreHistory(state.history[state.historyIndex]);
+}
+
+function redo() {
+  if (state.historyIndex >= state.history.length - 1) return;
+  state.historyIndex++;
+  restoreHistory(state.history[state.historyIndex]);
+}
+
+function restoreHistory(params) {
+  state.params = {
+    ...params,
+    hsl: JSON.parse(JSON.stringify(params.hsl)),
+  };
+  syncSliders();
+  updateHslDots();
+  redraw();
+  drawHistogram();
+  updateHistoryBtns();
+}
 
 function syncSliders() {
-  document.querySelectorAll('.adj-slider').forEach(slider => {
+  document.querySelectorAll('.adj-slider:not(.hsl-slider)').forEach(slider => {
     const param = slider.dataset.param;
     if (state.params[param] === undefined) return;
     const value          = state.params[param];
@@ -664,10 +843,22 @@ function syncSliders() {
     const valEl          = slider.nextElementSibling;
     valEl.textContent    = value > 0 ? `+${value}` : `${value}`;
     valEl.style.color    = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
-    slider.closest('.slider-row')
-      .classList.toggle('slider-row--active', value !== 0);
+    slider.closest('.slider-row').classList.toggle('slider-row--active', value !== 0);
     updateSliderTrack(slider);
   });
+
+  // Also sync HSL sliders for current active band
+  if (activeHueBand !== 'all') {
+    const band = state.params.hsl[activeHueBand];
+    document.querySelectorAll('.hsl-slider').forEach(s => {
+      const key             = s.dataset.hsl;
+      const value           = band[key];
+      s.value               = value;
+      s.nextElementSibling.textContent = value > 0 ? `+${value}` : `${value}`;
+      s.nextElementSibling.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
+      updateSliderTrack(s);
+    });
+  }
 }
 
 function updateHistoryBtns() {
@@ -681,21 +872,22 @@ function updateHistoryBtns() {
 //  CANVAS EVENTS — ZOOM & PAN
 // ═══════════════════════════════════════════
 function bindCanvasEvents() {
-  // Resize
   new ResizeObserver(() => {
     if (state.imageLoaded) redraw();
   }).observe(canvasArea);
 
-  // Wheel zoom
+  // Scroll to zoom
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
-    const rect   = canvas.getBoundingClientRect();
-    const mx     = e.clientX - rect.left;
-    const my     = e.clientY - rect.top;
-    zoomTo(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), mx, my);
+    const rect = canvas.getBoundingClientRect();
+    zoomTo(
+      state.zoom * (e.deltaY > 0 ? 0.9 : 1.1),
+      e.clientX - rect.left,
+      e.clientY - rect.top
+    );
   }, { passive: false });
 
-  // Pan — mousedown
+  // Pan — middle mouse or space+drag
   canvas.addEventListener('mousedown', e => {
     if (e.button === 1 || state.spaceHeld) {
       e.preventDefault();
@@ -731,10 +923,10 @@ function bindCanvasEvents() {
   canvas.addEventListener('touchmove', e => {
     if (e.touches.length !== 2) return;
     e.preventDefault();
-    const d   = pinchDist(e);
+    const d    = pinchDist(e);
     const rect = canvas.getBoundingClientRect();
-    const cx  = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-    const cy  = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+    const cx   = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+    const cy   = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
     zoomTo(state.zoom * d / lastPinch, cx, cy);
     lastPinch = d;
   }, { passive: false });
@@ -742,7 +934,11 @@ function bindCanvasEvents() {
   // Double-click zoom
   canvas.addEventListener('dblclick', e => {
     const rect = canvas.getBoundingClientRect();
-    zoomTo(state.zoom < 1.5 ? 2 : 1, e.clientX - rect.left, e.clientY - rect.top);
+    zoomTo(
+      state.zoom < 1.5 ? 2 : 1,
+      e.clientX - rect.left,
+      e.clientY - rect.top
+    );
   });
 }
 
@@ -811,44 +1007,43 @@ function bindTopbar() {
 
   document.getElementById('btnZoomIn') .addEventListener('click', () => zoomTo(state.zoom * 1.25, cx(), cy()));
   document.getElementById('btnZoomOut').addEventListener('click', () => zoomTo(state.zoom * 0.80, cx(), cy()));
-  document.getElementById('btnFit')   .addEventListener('click', fitToScreen);
-  document.getElementById('btnUndo')  .addEventListener('click', undo);
-  document.getElementById('btnRedo')  .addEventListener('click', redo);
+  document.getElementById('btnFit')    .addEventListener('click', fitToScreen);
+  document.getElementById('btnUndo')   .addEventListener('click', undo);
+  document.getElementById('btnRedo')   .addEventListener('click', redo);
 
-  // Reset all
+  // Reset all edits including HSL
   document.getElementById('btnReset').addEventListener('click', () => {
     Object.keys(state.params).forEach(k => {
       if (k !== 'hsl') state.params[k] = 0;
     });
-    // Reset all hsl bands
     Object.keys(state.params.hsl).forEach(band => {
       state.params.hsl[band] = { hue: 0, sat: 0, lum: 0 };
     });
+
     syncSliders();
     updateHslDots();
-  
-    // Reset HSL sliders display
+
+    // Reset HSL sliders visually
     document.querySelectorAll('.hsl-slider').forEach(s => {
-      s.value = 0;
+      s.value                          = 0;
       s.nextElementSibling.textContent = '0';
       s.nextElementSibling.style.color = 'var(--text-muted)';
       updateSliderTrack(s);
     });
-  
+
     redraw();
     drawHistogram();
     pushHistory();
     showHint('All edits reset ↺');
   });
 
-  // Before / After
+  // Before / After toggle
   let showingBefore = false;
   document.getElementById('btnBefore').addEventListener('click', () => {
     showingBefore = !showingBefore;
     const btn = document.getElementById('btnBefore');
 
     if (showingBefore) {
-      // Show original unedited image
       const area    = canvasArea.getBoundingClientRect();
       canvas.width  = area.width;
       canvas.height = area.height;
@@ -884,15 +1079,15 @@ function bindKeyboard() {
 
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
     if ((e.ctrlKey || e.metaKey) && e.key === 'y')                { e.preventDefault(); redo(); }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && e.shiftKey)  { e.preventDefault(); redo(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' &&  e.shiftKey) { e.preventDefault(); redo(); }
 
     switch (e.key) {
-      case '0': fitToScreen();                            break;
-      case '1': zoomTo(1, cx, cy);                       break;
-      case '2': zoomTo(2, cx, cy);                       break;
+      case '0': fitToScreen();                       break;
+      case '1': zoomTo(1, cx, cy);                  break;
+      case '2': zoomTo(2, cx, cy);                  break;
       case '+':
-      case '=': zoomTo(state.zoom * 1.25, cx, cy);       break;
-      case '-': zoomTo(state.zoom * 0.80, cx, cy);       break;
+      case '=': zoomTo(state.zoom * 1.25, cx, cy);  break;
+      case '-': zoomTo(state.zoom * 0.80, cx, cy);  break;
       case 'b':
       case 'B': document.getElementById('btnBefore').click(); break;
       case 'r':
@@ -914,6 +1109,67 @@ function showHint(msg) {
   }, 2500);
 }
 canvasHint.style.transition = 'opacity 0.4s';
+
+// ═══════════════════════════════════════════
+//  WHITE BALANCE PRESETS & BINDING
+// ═══════════════════════════════════════════
+function bindWhiteBalance() {
+    // Preset buttons
+    document.querySelectorAll('.wb-preset').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const temp = parseInt(btn.dataset.temp);
+        const tint = parseInt(btn.dataset.tint);
+  
+        // Apply to state
+        state.params.temperature = temp;
+        state.params.tint        = tint;
+  
+        // Sync sliders
+        const tempSlider = document.querySelector('.adj-slider[data-param="temperature"]');
+        const tintSlider = document.querySelector('.adj-slider[data-param="tint"]');
+  
+        if (tempSlider) {
+          tempSlider.value = temp;
+          const valEl      = tempSlider.nextElementSibling;
+          valEl.textContent = temp > 0 ? `+${temp}` : `${temp}`;
+          valEl.style.color = temp !== 0 ? 'var(--accent)' : 'var(--text-muted)';
+          tempSlider.closest('.slider-row')
+            .classList.toggle('slider-row--active', temp !== 0);
+          updateSliderTrack(tempSlider);
+        }
+  
+        if (tintSlider) {
+          tintSlider.value  = tint;
+          const valEl       = tintSlider.nextElementSibling;
+          valEl.textContent = tint > 0 ? `+${tint}` : `${tint}`;
+          valEl.style.color = tint !== 0 ? 'var(--accent)' : 'var(--text-muted)';
+          tintSlider.closest('.slider-row')
+            .classList.toggle('slider-row--active', tint !== 0);
+          updateSliderTrack(tintSlider);
+        }
+  
+        // Update active preset highlight
+        document.querySelectorAll('.wb-preset').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+  
+        scheduleRedraw();
+        drawHistogram();
+        pushHistory();
+        showHint(`White balance: ${btn.textContent}`);
+      });
+    });
+  
+    // Live Kelvin readout on temperature slider
+    const tempSlider = document.querySelector('.adj-slider[data-param="temperature"]');
+    if (tempSlider) {
+      tempSlider.addEventListener('input', () => {
+        const kelvin = Math.round(sliderToKelvin(parseInt(tempSlider.value)));
+        showHint(`${kelvin.toLocaleString()}K`);
+        // Deactivate preset buttons when manual slider is used
+        document.querySelectorAll('.wb-preset').forEach(b => b.classList.remove('active'));
+      });
+    }
+  }
 
 // ═══════════════════════════════════════════
 //  START
