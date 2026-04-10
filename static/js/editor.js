@@ -47,7 +47,11 @@ const state = {
       magenta: { hue: 0, sat: 0, lum: 0 },
     },
     sharpness:       0,
+    sharpen_radius:  1,
+    sharpen_detail:  25,
     noise_reduction: 0,
+    noise_detail:    50,
+    noise_contrast:  0,
     vignette:        0,
     grain:           0,
     rotation:        0,
@@ -102,6 +106,12 @@ function loadImage(src) {
   };
   img.onerror = () => showHint('⚠ Failed to load image');
   img.src     = src;
+  // Warn if image is very large — convolutions are slow on big images
+    if (img.naturalWidth * img.naturalHeight > 4000000) {
+        console.warn('Pixloft: image > 4MP — sharpening/noise reduction may be slow');
+        showHint('Large image — Detail edits may be slow on this device');
+  }
+  
 }
 
 // ═══════════════════════════════════════════
@@ -188,6 +198,175 @@ function applyVibrance(r, g, b, amount) {
   const newS = Math.max(0, Math.min(1, s + (amount / 100) * (1 - s) * skinProtect));
   return hslToRgb(h, newS, l);
 }
+
+// ═══════════════════════════════════════════
+//  CONVOLUTION ENGINE
+//  Applies a kernel to every pixel using
+//  its neighbourhood of pixels
+// ═══════════════════════════════════════════
+
+// Apply a convolution kernel to ImageData
+// kernel is a flat array, size is kernel width/height (must be odd)
+function convolve(srcData, kernel, size) {
+    const width  = srcData.width;
+    const height = srcData.height;
+    const src    = srcData.data;
+    const dst    = new Uint8ClampedArray(src.length);
+    const half   = Math.floor(size / 2);
+    const kLen   = kernel.length;
+  
+    // Pre-compute kernel sum for normalisation
+    let kSum = 0;
+    for (let k = 0; k < kLen; k++) kSum += kernel[k];
+    if (kSum === 0) kSum = 1; // avoid divide by zero
+  
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let r = 0, g = 0, b = 0;
+        let ki = 0;
+  
+        for (let ky = -half; ky <= half; ky++) {
+          for (let kx = -half; kx <= half; kx++) {
+            // Clamp to image edges (edge-extend)
+            const px = Math.max(0, Math.min(width  - 1, x + kx));
+            const py = Math.max(0, Math.min(height - 1, y + ky));
+            const idx = (py * width + px) * 4;
+            const w   = kernel[ki++];
+            r += src[idx]     * w;
+            g += src[idx + 1] * w;
+            b += src[idx + 2] * w;
+          }
+        }
+  
+        const outIdx     = (y * width + x) * 4;
+        dst[outIdx]      = Math.max(0, Math.min(255, r / kSum));
+        dst[outIdx + 1]  = Math.max(0, Math.min(255, g / kSum));
+        dst[outIdx + 2]  = Math.max(0, Math.min(255, b / kSum));
+        dst[outIdx + 3]  = src[outIdx + 3]; // preserve alpha
+      }
+    }
+    return new ImageData(dst, width, height);
+  }
+  
+  // ── Build a Gaussian blur kernel ──
+  // sigma controls spread — larger = more blur
+  function buildGaussianKernel(size, sigma) {
+    const kernel = [];
+    const half   = Math.floor(size / 2);
+    let total    = 0;
+  
+    for (let y = -half; y <= half; y++) {
+      for (let x = -half; x <= half; x++) {
+        const val = Math.exp(-(x*x + y*y) / (2 * sigma * sigma));
+        kernel.push(val);
+        total += val;
+      }
+    }
+    // Normalise so kernel sums to 1
+    return kernel.map(v => v / total);
+  }
+  
+  // ── Unsharp mask sharpening ──
+  // Sharpening = Original + amount * (Original - Blurred)
+  // The "detail" param controls an edge threshold —
+  // pixels below this threshold are not sharpened
+  // (prevents boosting noise in smooth areas)
+  function applySharpen(imageData, amount, radius, detailThreshold) {
+    if (amount === 0) return imageData;
+  
+    const width  = imageData.width;
+    const height = imageData.height;
+  
+    // Choose kernel size based on radius slider
+    const kSize  = radius <= 1 ? 3 : radius <= 2 ? 5 : 7;
+    const sigma  = radius * 0.8;
+    const kernel = buildGaussianKernel(kSize, sigma);
+  
+    // Get blurred version
+    const blurred = convolve(imageData, kernel, kSize);
+  
+    const src = imageData.data;
+    const blr = blurred.data;
+    const dst = new Uint8ClampedArray(src.length);
+    const str = amount / 100; // 0–1 strength
+  
+    for (let i = 0; i < src.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const orig = src[i + c];
+        const blur = blr[i + c];
+        const diff = orig - blur; // edge signal
+  
+        // Only apply sharpening when edge signal exceeds detail threshold
+        // This protects smooth areas from noise amplification
+        const threshold = detailThreshold / 100 * 30;
+        const edge      = Math.abs(diff) > threshold ? diff : 0;
+  
+        dst[i + c] = Math.max(0, Math.min(255, orig + str * edge * 2.5));
+      }
+      dst[i + 3] = src[i + 3];
+    }
+    return new ImageData(dst, width, height);
+  }
+  
+  // ── Gaussian noise reduction ──
+  // Blends original with blurred based on strength
+  // The "detail" param controls how much local contrast
+  // to preserve (edge-aware blending)
+  function applyNoiseReduction(imageData, amount, detail, contrastBoost) {
+    if (amount === 0) return imageData;
+  
+    const width  = imageData.width;
+    const height = imageData.height;
+    const str    = amount / 100; // 0–1
+  
+    // Choose blur kernel based on strength
+    // More noise reduction = larger kernel
+    const kSize  = amount < 30 ? 3 : amount < 60 ? 5 : 7;
+    const sigma  = 1 + amount / 40;
+    const kernel = buildGaussianKernel(kSize, sigma);
+  
+    const blurred = convolve(imageData, kernel, kSize);
+  
+    const src = imageData.data;
+    const blr = blurred.data;
+    const dst = new Uint8ClampedArray(src.length);
+  
+    // Detail preservation: areas with high local contrast
+    // (edges) get less blurring so detail is preserved
+    const detailStr = detail / 100;
+  
+    for (let i = 0; i < src.length; i += 4) {
+      const rO = src[i], gO = src[i+1], bO = src[i+2];
+      const rB = blr[i], gB = blr[i+1], bB = blr[i+2];
+  
+      // Local contrast (how "edgy" this pixel is)
+      const localContrast = Math.abs(rO-rB) + Math.abs(gO-gB) + Math.abs(bO-bB);
+  
+      // Edge pixels blend less (preserve detail)
+      const edgeFactor  = Math.min(1, localContrast / 60 * detailStr);
+      const blendFactor = str * (1 - edgeFactor);
+  
+      let r = rO + (rB - rO) * blendFactor;
+      let g = gO + (gB - gO) * blendFactor;
+      let b = bO + (bB - bO) * blendFactor;
+  
+      // Optional: slight contrast boost after noise reduction
+      // to compensate for the softening effect
+      if (contrastBoost > 0) {
+        const boost = contrastBoost / 100 * 0.3;
+        const luma  = 0.299*r + 0.587*g + 0.114*b;
+        r = luma + (r - luma) * (1 + boost);
+        g = luma + (g - luma) * (1 + boost);
+        b = luma + (b - luma) * (1 + boost);
+      }
+  
+      dst[i]   = Math.max(0, Math.min(255, r));
+      dst[i+1] = Math.max(0, Math.min(255, g));
+      dst[i+2] = Math.max(0, Math.min(255, b));
+      dst[i+3] = src[i+3];
+    }
+    return new ImageData(dst, width, height);
+  }
 
 // ═══════════════════════════════════════════
 //  WHITE BALANCE ENGINE
@@ -377,43 +556,124 @@ function flipCanvas(horizontal) {
 }
 
 // ═══════════════════════════════════════════
-//  PIXEL PROCESSING
+//  PIXEL PROCESSING (COMBINED)
 // ═══════════════════════════════════════════
 function processPixels(srcData) {
-  const p=state.params, data=new Uint8ClampedArray(srcData.data), len=data.length;
-  const brightness=p.brightness*0.8, exposure=p.exposure*1.0;
-  const saturation=p.saturation/100, highlights=p.highlights*0.6, shadows=p.shadows*0.6;
-  const cVal=p.contrast;
-  const cFactor=cVal!==0?(259*(cVal+255))/(255*(259-cVal)):1;
-  const lut=new Uint8ClampedArray(256);
-  for (let i=0;i<256;i++) {
-    let v=i+exposure+brightness;
-    if (cVal!==0) v=cFactor*(v-128)+128;
-    lut[i]=Math.max(0,Math.min(255,v));
-  }
-  const hslParams=p.hsl;
-  const hasHslEdits=Object.values(hslParams).some(b=>b.hue!==0||b.sat!==0||b.lum!==0);
-
-  for (let i=0;i<len;i+=4) {
-    let r=lut[data[i]], g=lut[data[i+1]], b=lut[data[i+2]];
-    const luma=0.299*r+0.587*g+0.114*b;
-    if (highlights!==0) { const w=Math.max(0,(luma-128)/127); r+=highlights*w; g+=highlights*w; b+=highlights*w; }
-    if (shadows!==0)    { const w=Math.max(0,(128-luma)/128); r+=shadows*w;    g+=shadows*w;    b+=shadows*w;    }
-    if (state._wbMatrix&&(p.temperature!==0||p.tint!==0)) {
-      const wb=applyWbMatrix(r,g,b,state._wbMatrix); r=wb.r; g=wb.g; b=wb.b;
+    const p    = state.params;
+    const data = new Uint8ClampedArray(srcData.data);
+    const len  = data.length;
+  
+    const brightness = p.brightness * 0.8;
+    const exposure   = p.exposure   * 1.0;
+    const saturation = p.saturation / 100;
+    const highlights = p.highlights * 0.6;
+    const shadows    = p.shadows    * 0.6;
+  
+    const cVal    = p.contrast;
+    const cFactor = cVal !== 0
+      ? (259 * (cVal + 255)) / (255 * (259 - cVal))
+      : 1;
+  
+    // ── LUT (Brightness + Exposure + Contrast) ──
+    const lut = new Uint8ClampedArray(256);
+    for (let i = 0; i < 256; i++) {
+      let v = i + exposure + brightness;
+      if (cVal !== 0) v = cFactor * (v - 128) + 128;
+      lut[i] = Math.max(0, Math.min(255, v));
     }
-    if (saturation!==0) {
-      const grey=0.299*r+0.587*g+0.114*b;
-      r=grey+(r-grey)*(1+saturation); g=grey+(g-grey)*(1+saturation); b=grey+(b-grey)*(1+saturation);
+  
+    const hslParams   = p.hsl;
+    const hasHslEdits = Object.values(hslParams).some(
+      band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
+    );
+  
+    // ── Per-pixel adjustments ──
+    for (let i = 0; i < len; i += 4) {
+  
+      let r = lut[data[i]];
+      let g = lut[data[i + 1]];
+      let b = lut[data[i + 2]];
+  
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  
+      // Highlights
+      if (highlights !== 0) {
+        const w = Math.max(0, (luma - 128) / 127);
+        r += highlights * w;
+        g += highlights * w;
+        b += highlights * w;
+      }
+  
+      // Shadows
+      if (shadows !== 0) {
+        const w = Math.max(0, (128 - luma) / 128);
+        r += shadows * w;
+        g += shadows * w;
+        b += shadows * w;
+      }
+  
+      // White balance
+      if (state._wbMatrix && (p.temperature !== 0 || p.tint !== 0)) {
+        const wb = applyWbMatrix(r, g, b, state._wbMatrix);
+        r = wb.r;
+        g = wb.g;
+        b = wb.b;
+      }
+  
+      // Saturation
+      if (saturation !== 0) {
+        const grey = 0.299 * r + 0.587 * g + 0.114 * b;
+        r = grey + (r - grey) * (1 + saturation);
+        g = grey + (g - grey) * (1 + saturation);
+        b = grey + (b - grey) * (1 + saturation);
+      }
+  
+      // HSL
+      if (hasHslEdits) {
+        const res = applyHslToPixel(r, g, b, hslParams);
+        r = res.r;
+        g = res.g;
+        b = res.b;
+      }
+  
+      // Vibrance
+      if (p.vibrance !== 0) {
+        const res = applyVibrance(r, g, b, p.vibrance);
+        r = res.r;
+        g = res.g;
+        b = res.b;
+      }
+  
+      data[i]     = Math.max(0, Math.min(255, r));
+      data[i + 1] = Math.max(0, Math.min(255, g));
+      data[i + 2] = Math.max(0, Math.min(255, b));
     }
-    if (hasHslEdits) { const res=applyHslToPixel(r,g,b,hslParams); r=res.r; g=res.g; b=res.b; }
-    if (p.vibrance!==0) { const res=applyVibrance(r,g,b,p.vibrance); r=res.r; g=res.g; b=res.b; }
-    data[i]=Math.max(0,Math.min(255,r));
-    data[i+1]=Math.max(0,Math.min(255,g));
-    data[i+2]=Math.max(0,Math.min(255,b));
+  
+    // ── Build intermediate ImageData ──
+    let result = new ImageData(data, srcData.width, srcData.height);
+  
+    // ── Noise Reduction (before sharpening) ──
+    if (p.noise_reduction > 0) {
+      result = applyNoiseReduction(
+        result,
+        p.noise_reduction,
+        p.noise_detail   ?? 50,
+        p.noise_contrast ?? 0
+      );
+    }
+  
+    // ── Sharpening (last step) ──
+    if (p.sharpness > 0) {
+      result = applySharpen(
+        result,
+        p.sharpness,
+        p.sharpen_radius ?? 1,
+        p.sharpen_detail ?? 25
+      );
+    }
+  
+    return result;
   }
-  return new ImageData(data,srcData.width,srcData.height);
-}
 
 // ═══════════════════════════════════════════
 //  REDRAW
