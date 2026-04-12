@@ -30,6 +30,8 @@
         <button class="topbar-btn" id="btnRedo" title="Redo (Ctrl+Y)" disabled>↪ Redo</button>
         <button class="topbar-btn" id="btnBefore" title="Before/After (B)">◧ Before</button>
         <button class="topbar-btn" id="btnReset" title="Reset all edits (R)">↺ Reset</button>
+        <button class="topbar-btn" id="btnSaveState" title="Save edit state as JSON">⬇ Save State</button>
+        <button class="topbar-btn" id="btnLoadState" title="Load edit state from JSON">⬆ Load State</button>
         <button class="btn btn--primary" id="btnExport">⬇ Export</button>
       </div>
   </header>
@@ -139,6 +141,15 @@
           <span class="info-val">{{ image.resolution }}</span>
         </div>
       </div>
+
+      <!-- History Panel -->
+<div class="panel-section" id="historyPanel">
+  <div class="panel-label" style="display:flex;justify-content:space-between;align-items:center;">
+    <span>History</span>
+    <button class="history-clear-btn" id="btnClearHistory" title="Clear history">✕</button>
+  </div>
+  <div class="history-list" id="historyList"></div>
+</div>
     </aside>
 
     <!-- CENTER — Canvas -->
@@ -190,7 +201,6 @@
           </div>
         </div>
 
-        <!-- Color -->
 <!-- Color -->
 <div class="accordion-section">
     <button class="accordion-header">
@@ -413,9 +423,9 @@
 
 {% block extra_js %}
 <script>
-// Image source passed from Django
-const IMAGE_URL = "{{ image.file.url }}";
-const IMAGE_ID  = {{ image.pk }};
+  const IMAGE_URL  = "{{ image.file.url }}";
+  const IMAGE_ID   = {{ image.pk }};
+  const IMAGE_NAME = "{{ image.original_name }}";
 </script>
 <script src="{% static 'js/editor.js' %}"></script>
 {% endblock %}

@@ -647,3 +647,54 @@ body:has(.editor-shell) main {
     letter-spacing: 0.08em;
     margin-bottom: 10px;
   }
+
+  /* ===== History Panel ===== */
+.history-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0 -14px;
+  padding: 0 14px;
+}
+.history-list::-webkit-scrollbar { width: 3px; }
+.history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 0.1s, color 0.1s;
+  user-select: none;
+}
+.history-item:hover { background: var(--bg-2); color: var(--text-primary); }
+.history-item--active {
+  background: rgba(124,111,255,0.12);
+  color: var(--accent);
+}
+.history-icon { font-size: 10px; flex-shrink: 0; opacity: 0.7; }
+.history-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history-step {
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 16px;
+  text-align: right;
+}
+
+.history-clear-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.history-clear-btn:hover { color: var(--danger); background: rgba(255,85,85,0.1); }
+
+/* ===== Save/Load State buttons ===== */
+.topbar-btn + .topbar-btn { margin-left: 0; }
