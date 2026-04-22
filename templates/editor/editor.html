@@ -201,6 +201,36 @@
           </div>
         </div>
 
+        <!-- Tone Curve -->
+        <div class="accordion-section">
+          <button class="accordion-header">
+            <span>〜 Tone Curve</span>
+            <span class="accordion-arrow">▾</span>
+          </button>
+          <div class="accordion-body" style="display:none; padding: 10px 14px;">
+
+            <!-- Channel selector -->
+            <div class="curve-channels">
+              <button class="curve-ch active" data-ch="luma">RGB</button>
+              <button class="curve-ch" data-ch="r" style="--cc:#ff5555;">R</button>
+              <button class="curve-ch" data-ch="g" style="--cc:#55cc55;">G</button>
+              <button class="curve-ch" data-ch="b" style="--cc:#5588ff;">B</button>
+            </div>
+
+            <!-- Curve canvas -->
+            <div class="curve-wrap">
+              <canvas id="curveCanvas" width="200" height="200"></canvas>
+            </div>
+
+            <!-- Point info -->
+            <div class="curve-info">
+              <span id="curvePointInfo">Click curve to add point</span>
+              <button class="curve-reset-btn" id="btnResetCurve">Reset</button>
+            </div>
+
+          </div>
+        </div>
+
 <!-- Color -->
 <div class="accordion-section">
     <button class="accordion-header">

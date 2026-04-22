@@ -1,5 +1,7 @@
-// ===== Pixloft Editor Engine — Day 12 =====
+// ===== Pixloft Editor Engine — Day 13 =====
+
 let largeImageWarningShown = false;
+
 // ── DOM refs ──
 const canvas     = document.getElementById('mainCanvas');
 const ctx        = canvas.getContext('2d');
@@ -38,6 +40,13 @@ const state = {
     vibrance:        0,
     temperature:     0,
     tint:            0,
+    // Tone curve
+    curve: {
+      luma: [[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      r:    [[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      g:    [[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      b:    [[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+    },
     // HSL per-hue
     hsl: {
       red:     { hue: 0, sat: 0, lum: 0 },
@@ -81,6 +90,13 @@ let activeHueBand = 'all';
 let rotSlider     = null;
 let rotVal        = null;
 
+// ── Tone curve state ──
+let activeCurveChannel = 'luma';
+let curveCanvas        = null;
+let curveCtx           = null;
+let curveDragging      = null;
+let curveHover         = null;
+
 // ── LocalStorage key ──
 const LS_KEY = `pixloft_state_${typeof IMAGE_ID !== 'undefined' ? IMAGE_ID : 'default'}`;
 
@@ -98,6 +114,8 @@ function init() {
   bindHistoryPanel();
   bindKeyboard();
   bindWhiteBalance();
+  initCurveCanvas();
+  bindCurveChannels();
 }
 
 // ═══════════════════════════════════════════
@@ -115,7 +133,7 @@ function loadImage(src) {
     offscreen        = document.createElement('canvas');
     offscreen.width  = img.naturalWidth;
     offscreen.height = img.naturalHeight;
-    offscreenCtx = offscreen.getContext('2d', { willReadFrequently: true });
+    offscreenCtx     = offscreen.getContext('2d', { willReadFrequently: true });
     offscreenCtx.drawImage(img, 0, 0);
 
     fitToScreen();
@@ -128,6 +146,7 @@ function loadImage(src) {
     if (restored) {
       syncSliders();
       updateHslDots();
+      if (curveCanvas) drawCurveCanvas();
       redraw();
       drawHistogram();
       pushHistory();
@@ -138,7 +157,6 @@ function loadImage(src) {
 
     updateHistoryPanel();
 
-    // Large image warning — must be inside onload so naturalWidth is valid
     if (!largeImageWarningShown && img.naturalWidth * img.naturalHeight > 4000000) {
       console.warn('Pixloft: large image — sharpening/noise reduction may be slow');
       largeImageWarningShown = true;
@@ -146,7 +164,7 @@ function loadImage(src) {
   };
 
   img.onerror = () => showHint('⚠ Failed to load image');
-  img.src     = src; // assign src last
+  img.src     = src;
 }
 
 // ═══════════════════════════════════════════
@@ -217,7 +235,6 @@ function applyHslToPixel(r, g, b, hslParams) {
     dSat += hslParams[band].sat * w;
     dLum += hslParams[band].lum * w;
   }
-  // Red wraps near 360°
   const wRed2 = hueWeight(h, 360, HUE_BANDS.red.range);
   if (wRed2 > 0) {
     dHue += hslParams.red.hue * wRed2;
@@ -295,15 +312,323 @@ function updateWbMatrixDisplay(matrix) {
 }
 
 // ═══════════════════════════════════════════
+//  TONE CURVE ENGINE
+// ═══════════════════════════════════════════
+function cubicSplineInterpolate(points, x) {
+  const n = points.length;
+  if (n === 0) return x;
+  if (n === 1) return points[0][1];
+  if (x <= points[0][0])   return points[0][1];
+  if (x >= points[n-1][0]) return points[n-1][1];
+
+  let i = 0;
+  while (i < n - 2 && points[i+1][0] < x) i++;
+
+  const p0 = points[Math.max(0, i-1)];
+  const p1 = points[i];
+  const p2 = points[i+1];
+  const p3 = points[Math.min(n-1, i+2)];
+
+  const t  = (x - p1[0]) / (p2[0] - p1[0]);
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const m1 = (p2[1] - p0[1]) * 0.5;
+  const m2 = (p3[1] - p1[1]) * 0.5;
+
+  const y = (2*t3 - 3*t2 + 1) * p1[1]
+          + (t3 - 2*t2 + t)   * m1
+          + (-2*t3 + 3*t2)    * p2[1]
+          + (t3 - t2)          * m2;
+
+  return Math.max(0, Math.min(1, y));
+}
+
+function buildCurveLut(points) {
+  const lut = new Uint8ClampedArray(256);
+  for (let i = 0; i < 256; i++) {
+    lut[i] = Math.round(cubicSplineInterpolate(points, i / 255) * 255);
+  }
+  return lut;
+}
+
+function isCurveDefault(points) {
+  const def = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]];
+  if (points.length !== def.length) return false;
+  return points.every((p, i) =>
+    Math.abs(p[0] - def[i][0]) < 0.001 && Math.abs(p[1] - def[i][1]) < 0.001
+  );
+}
+
+function applyCurves(imageData) {
+  const curves  = state.params.curve;
+  const hasLuma = !isCurveDefault(curves.luma);
+  const hasR    = !isCurveDefault(curves.r);
+  const hasG    = !isCurveDefault(curves.g);
+  const hasB    = !isCurveDefault(curves.b);
+  if (!hasLuma && !hasR && !hasG && !hasB) return imageData;
+
+  const lumaLut = hasLuma ? buildCurveLut(curves.luma) : null;
+  const rLut    = hasR    ? buildCurveLut(curves.r)    : null;
+  const gLut    = hasG    ? buildCurveLut(curves.g)    : null;
+  const bLut    = hasB    ? buildCurveLut(curves.b)    : null;
+
+  const data = new Uint8ClampedArray(imageData.data);
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i], g = data[i+1], b = data[i+2];
+    if (lumaLut) { r = lumaLut[r]; g = lumaLut[g]; b = lumaLut[b]; }
+    if (rLut) r = rLut[r];
+    if (gLut) g = gLut[g];
+    if (bLut) b = bLut[b];
+    data[i] = r; data[i+1] = g; data[i+2] = b;
+  }
+  return new ImageData(data, imageData.width, imageData.height);
+}
+
+// ── Curve canvas UI ──
+function initCurveCanvas() {
+  curveCanvas = document.getElementById('curveCanvas');
+  if (!curveCanvas) return;
+  curveCtx = curveCanvas.getContext('2d');
+
+  curveCanvas.addEventListener('mousedown',   onCurveMouseDown);
+  curveCanvas.addEventListener('mousemove',   onCurveMouseMove);
+  curveCanvas.addEventListener('mouseup',     onCurveMouseUp);
+  curveCanvas.addEventListener('mouseleave',  onCurveMouseLeave);
+  curveCanvas.addEventListener('dblclick',    onCurveDoubleClick);
+  curveCanvas.addEventListener('contextmenu', onCurveRightClick);
+
+  drawCurveCanvas();
+}
+
+function canvasToCurve(cx, cy) {
+  const pad = 16;
+  const w   = curveCanvas.width  - pad * 2;
+  const h   = curveCanvas.height - pad * 2;
+  return [
+    Math.max(0, Math.min(1, (cx - pad) / w)),
+    Math.max(0, Math.min(1, 1 - (cy - pad) / h)),
+  ];
+}
+
+function curveToCanvas(x, y) {
+  const pad = 16;
+  const w   = curveCanvas.width  - pad * 2;
+  const h   = curveCanvas.height - pad * 2;
+  return [pad + x * w, pad + (1 - y) * h];
+}
+
+function getActivePoints() {
+  return state.params.curve[activeCurveChannel];
+}
+
+function findClosestPoint(cx, cy, radius = 10) {
+  const pts = getActivePoints();
+  for (let i = 0; i < pts.length; i++) {
+    const [px, py] = curveToCanvas(pts[i][0], pts[i][1]);
+    if (Math.sqrt((cx - px)**2 + (cy - py)**2) < radius) return i;
+  }
+  return -1;
+}
+
+function getCurveCoords(e) {
+  const rect  = curveCanvas.getBoundingClientRect();
+  const scaleX = curveCanvas.width  / rect.width;
+  const scaleY = curveCanvas.height / rect.height;
+  return [
+    (e.clientX - rect.left) * scaleX,
+    (e.clientY - rect.top)  * scaleY,
+  ];
+}
+
+function onCurveMouseDown(e) {
+  const [cx, cy] = getCurveCoords(e);
+  const idx      = findClosestPoint(cx, cy);
+
+  if (idx >= 0) {
+    curveDragging = idx;
+  } else {
+    const [nx, ny] = canvasToCurve(cx, cy);
+    const pts      = getActivePoints();
+    pts.push([nx, ny]);
+    pts.sort((a, b) => a[0] - b[0]);
+    pts[0][0] = 0; pts[pts.length-1][0] = 1;
+    curveDragging = pts.findIndex(p =>
+      Math.abs(p[0] - nx) < 0.005 && Math.abs(p[1] - ny) < 0.005
+    );
+    scheduleRedraw(); drawHistogram();
+  }
+
+  drawCurveCanvas();
+  e.preventDefault();
+}
+
+function onCurveMouseMove(e) {
+  const [cx, cy] = getCurveCoords(e);
+
+  if (curveDragging !== null) {
+    const pts      = getActivePoints();
+    const [nx, ny] = canvasToCurve(cx, cy);
+    const isFirst  = curveDragging === 0;
+    const isLast   = curveDragging === pts.length - 1;
+
+    pts[curveDragging][0] = isFirst ? 0 : isLast ? 1 : nx;
+    pts[curveDragging][1] = ny;
+
+    if (!isFirst && pts[curveDragging][0] < pts[curveDragging-1][0] + 0.01)
+      pts[curveDragging][0] = pts[curveDragging-1][0] + 0.01;
+    if (!isLast && pts[curveDragging][0] > pts[curveDragging+1][0] - 0.01)
+      pts[curveDragging][0] = pts[curveDragging+1][0] - 0.01;
+
+    scheduleRedraw(); drawHistogram();
+    updateCurvePointInfo(pts[curveDragging]);
+  } else {
+    const prev    = curveHover;
+    curveHover    = findClosestPoint(cx, cy);
+    curveCanvas.style.cursor = curveHover >= 0 ? 'grab' : 'crosshair';
+    if (curveHover !== prev) drawCurveCanvas();
+  }
+}
+
+function onCurveMouseUp() {
+  if (curveDragging !== null) {
+    curveDragging = null;
+    pushHistory();
+    drawCurveCanvas();
+  }
+}
+
+function onCurveMouseLeave() {
+  curveDragging = null;
+  curveHover    = null;
+  curveCanvas.style.cursor = 'crosshair';
+  drawCurveCanvas();
+}
+
+function onCurveDoubleClick(e) {
+  const [cx, cy] = getCurveCoords(e);
+  const idx      = findClosestPoint(cx, cy, 12);
+  const pts      = getActivePoints();
+  if (idx > 0 && idx < pts.length - 1) {
+    pts.splice(idx, 1);
+    scheduleRedraw(); drawHistogram(); pushHistory(); drawCurveCanvas();
+  }
+}
+
+function onCurveRightClick(e) {
+  e.preventDefault();
+  const [cx, cy] = getCurveCoords(e);
+  const idx      = findClosestPoint(cx, cy, 12);
+  const pts      = getActivePoints();
+  if (idx > 0 && idx < pts.length - 1) {
+    pts.splice(idx, 1);
+    scheduleRedraw(); drawHistogram(); pushHistory(); drawCurveCanvas();
+  }
+}
+
+function updateCurvePointInfo(point) {
+  const el = document.getElementById('curvePointInfo');
+  if (el) el.textContent = `In: ${Math.round(point[0]*255)}  →  Out: ${Math.round(point[1]*255)}`;
+}
+
+function drawCurveCanvas() {
+  if (!curveCtx) return;
+  const cw = curveCanvas.width, ch = curveCanvas.height, pad = 16;
+
+  curveCtx.fillStyle = '#18181c';
+  curveCtx.fillRect(0, 0, cw, ch);
+
+  // Grid
+  curveCtx.strokeStyle = 'rgba(255,255,255,0.06)'; curveCtx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const x = pad + (cw - pad*2) * i/4, y = pad + (ch - pad*2) * i/4;
+    curveCtx.beginPath(); curveCtx.moveTo(x, pad);   curveCtx.lineTo(x, ch-pad); curveCtx.stroke();
+    curveCtx.beginPath(); curveCtx.moveTo(pad, y);   curveCtx.lineTo(cw-pad, y); curveCtx.stroke();
+  }
+
+  // Diagonal reference
+  curveCtx.strokeStyle = 'rgba(255,255,255,0.08)'; curveCtx.lineWidth = 1;
+  curveCtx.setLineDash([4, 4]);
+  curveCtx.beginPath(); curveCtx.moveTo(pad, ch-pad); curveCtx.lineTo(cw-pad, pad); curveCtx.stroke();
+  curveCtx.setLineDash([]);
+
+  const chColours = { luma: '#ffffff', r: '#ff5555', g: '#55cc55', b: '#5588ff' };
+
+  // Inactive channels faintly
+  for (const [ch, pts] of Object.entries(state.params.curve)) {
+    if (ch === activeCurveChannel || isCurveDefault(pts)) continue;
+    drawCurveLine(pts, chColours[ch], 0.25);
+  }
+
+  // Active channel
+  const pts   = getActivePoints();
+  const color = chColours[activeCurveChannel];
+  drawCurveLine(pts, color, 1);
+
+  // Control points
+  pts.forEach((pt, i) => {
+    const [px, py]   = curveToCanvas(pt[0], pt[1]);
+    const isHovered  = i === curveHover;
+    const isDragging = i === curveDragging;
+    curveCtx.beginPath();
+    curveCtx.arc(px, py, isDragging ? 6 : isHovered ? 5 : 4, 0, Math.PI * 2);
+    curveCtx.fillStyle   = isDragging || isHovered ? '#ffffff' : color;
+    curveCtx.strokeStyle = isDragging ? color : 'rgba(0,0,0,0.6)';
+    curveCtx.lineWidth   = 1.5;
+    curveCtx.fill(); curveCtx.stroke();
+  });
+}
+
+function drawCurveLine(pts, color, alpha) {
+  if (pts.length < 2) return;
+  curveCtx.save();
+  curveCtx.globalAlpha = alpha;
+  curveCtx.strokeStyle = color;
+  curveCtx.lineWidth   = 1.5;
+  curveCtx.shadowColor = color;
+  curveCtx.shadowBlur  = alpha > 0.5 ? 4 : 0;
+  curveCtx.beginPath();
+  for (let i = 0; i <= 100; i++) {
+    const x       = i / 100;
+    const y       = cubicSplineInterpolate(pts, x);
+    const [cx, cy] = curveToCanvas(x, y);
+    i === 0 ? curveCtx.moveTo(cx, cy) : curveCtx.lineTo(cx, cy);
+  }
+  curveCtx.stroke();
+  curveCtx.restore();
+}
+
+function bindCurveChannels() {
+  const btns = document.querySelectorAll('.curve-ch');
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      btns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeCurveChannel = btn.dataset.ch;
+      const el = document.getElementById('curvePointInfo');
+      if (el) el.textContent = 'Click curve to add point';
+      drawCurveCanvas();
+    });
+  });
+
+  const btnReset = document.getElementById('btnResetCurve');
+  if (btnReset) {
+    btnReset.addEventListener('click', () => {
+      state.params.curve[activeCurveChannel] = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]];
+      scheduleRedraw(); drawHistogram(); pushHistory(); drawCurveCanvas();
+      showHint(`${activeCurveChannel.toUpperCase()} curve reset`);
+    });
+  }
+}
+
+// ═══════════════════════════════════════════
 //  CONVOLUTION ENGINE
 // ═══════════════════════════════════════════
 function convolve(srcData, kernel, size) {
-  const width  = srcData.width;
-  const height = srcData.height;
-  const src    = srcData.data;
-  const dst    = new Uint8ClampedArray(src.length);
-  const half   = Math.floor(size / 2);
-  let kSum = 0;
+  const width = srcData.width, height = srcData.height;
+  const src   = srcData.data;
+  const dst   = new Uint8ClampedArray(src.length);
+  const half  = Math.floor(size / 2);
+  let kSum    = 0;
   for (let k = 0; k < kernel.length; k++) kSum += kernel[k];
   if (kSum === 0) kSum = 1;
 
@@ -316,32 +641,27 @@ function convolve(srcData, kernel, size) {
           const py  = Math.max(0, Math.min(height - 1, y + ky));
           const idx = (py * width + px) * 4;
           const w   = kernel[ki++];
-          r += src[idx]     * w;
-          g += src[idx + 1] * w;
-          b += src[idx + 2] * w;
+          r += src[idx] * w; g += src[idx+1] * w; b += src[idx+2] * w;
         }
       }
-      const out    = (y * width + x) * 4;
-      dst[out]     = Math.max(0, Math.min(255, r / kSum));
-      dst[out + 1] = Math.max(0, Math.min(255, g / kSum));
-      dst[out + 2] = Math.max(0, Math.min(255, b / kSum));
-      dst[out + 3] = src[out + 3];
+      const out = (y * width + x) * 4;
+      dst[out]   = Math.max(0, Math.min(255, r / kSum));
+      dst[out+1] = Math.max(0, Math.min(255, g / kSum));
+      dst[out+2] = Math.max(0, Math.min(255, b / kSum));
+      dst[out+3] = src[out+3];
     }
   }
   return new ImageData(dst, width, height);
 }
 
 function buildGaussianKernel(size, sigma) {
-  const kernel = [];
-  const half   = Math.floor(size / 2);
-  let total    = 0;
-  for (let y = -half; y <= half; y++) {
+  const kernel = [], half = Math.floor(size / 2);
+  let total = 0;
+  for (let y = -half; y <= half; y++)
     for (let x = -half; x <= half; x++) {
-      const val = Math.exp(-(x * x + y * y) / (2 * sigma * sigma));
-      kernel.push(val);
-      total += val;
+      const val = Math.exp(-(x*x + y*y) / (2 * sigma * sigma));
+      kernel.push(val); total += val;
     }
-  }
   return kernel.map(v => v / total);
 }
 
@@ -350,20 +670,17 @@ function applySharpen(imageData, amount, radius, detailThreshold) {
   const kSize   = radius <= 1 ? 3 : radius <= 2 ? 5 : 7;
   const kernel  = buildGaussianKernel(kSize, radius * 0.8);
   const blurred = convolve(imageData, kernel, kSize);
-  const src = imageData.data;
-  const blr = blurred.data;
+  const src = imageData.data, blr = blurred.data;
   const dst = new Uint8ClampedArray(src.length);
-  const str = amount / 100;
-  const threshold = detailThreshold / 100 * 30;
+  const str = amount / 100, threshold = detailThreshold / 100 * 30;
 
   for (let i = 0; i < src.length; i += 4) {
     for (let c = 0; c < 3; c++) {
-      const orig = src[i + c];
-      const diff = orig - blr[i + c];
+      const orig = src[i+c], diff = orig - blr[i+c];
       const edge = Math.abs(diff) > threshold ? diff : 0;
-      dst[i + c] = Math.max(0, Math.min(255, orig + str * edge * 2.5));
+      dst[i+c] = Math.max(0, Math.min(255, orig + str * edge * 2.5));
     }
-    dst[i + 3] = src[i + 3];
+    dst[i+3] = src[i+3];
   }
   return new ImageData(dst, imageData.width, imageData.height);
 }
@@ -374,28 +691,22 @@ function applyNoiseReduction(imageData, amount, detail, contrastBoost) {
   const kSize   = amount < 30 ? 3 : amount < 60 ? 5 : 7;
   const kernel  = buildGaussianKernel(kSize, 1 + amount / 40);
   const blurred = convolve(imageData, kernel, kSize);
-  const src = imageData.data;
-  const blr = blurred.data;
+  const src = imageData.data, blr = blurred.data;
   const dst = new Uint8ClampedArray(src.length);
   const detailStr = detail / 100;
 
   for (let i = 0; i < src.length; i += 4) {
     const rO = src[i], gO = src[i+1], bO = src[i+2];
     const rB = blr[i], gB = blr[i+1], bB = blr[i+2];
-    const localContrast = Math.abs(rO-rB) + Math.abs(gO-gB) + Math.abs(bO-bB);
-    const edgeFactor    = Math.min(1, localContrast / 60 * detailStr);
-    const blend         = str * (1 - edgeFactor);
+    const lc    = Math.abs(rO-rB) + Math.abs(gO-gB) + Math.abs(bO-bB);
+    const blend = str * (1 - Math.min(1, lc / 60 * detailStr));
 
-    let r = rO + (rB - rO) * blend;
-    let g = gO + (gB - gO) * blend;
-    let b = bO + (bB - bO) * blend;
+    let r = rO + (rB-rO)*blend, g = gO + (gB-gO)*blend, b = bO + (bB-bO)*blend;
 
     if (contrastBoost > 0) {
       const boost = contrastBoost / 100 * 0.3;
-      const luma  = 0.299 * r + 0.587 * g + 0.114 * b;
-      r = luma + (r - luma) * (1 + boost);
-      g = luma + (g - luma) * (1 + boost);
-      b = luma + (b - luma) * (1 + boost);
+      const luma  = 0.299*r + 0.587*g + 0.114*b;
+      r = luma + (r-luma)*(1+boost); g = luma + (g-luma)*(1+boost); b = luma + (b-luma)*(1+boost);
     }
 
     dst[i]   = Math.max(0, Math.min(255, r));
@@ -424,10 +735,8 @@ function imageToScreen(ix, iy) {
 }
 function clampCropRect(r) {
   const iw = offscreen.width, ih = offscreen.height;
-  r.x = Math.max(0, Math.min(r.x, iw - 2));
-  r.y = Math.max(0, Math.min(r.y, ih - 2));
-  r.w = Math.max(2, Math.min(r.w, iw - r.x));
-  r.h = Math.max(2, Math.min(r.h, ih - r.y));
+  r.x = Math.max(0, Math.min(r.x, iw-2)); r.y = Math.max(0, Math.min(r.y, ih-2));
+  r.w = Math.max(2, Math.min(r.w, iw-r.x)); r.h = Math.max(2, Math.min(r.h, ih-r.y));
   return r;
 }
 function enforceAspectRatio(r, anchor) {
@@ -439,76 +748,76 @@ function enforceAspectRatio(r, anchor) {
 }
 function getCropHandles() {
   const { x, y, w, h } = crop.rect;
-  const s = imageToScreen(x, y), e = imageToScreen(x + w, y + h);
-  const mx = (s.x + e.x) / 2, my = (s.y + e.y) / 2, hs = 8;
-  const H = (cx, cy, id) => ({ id, x: cx - hs/2, y: cy - hs/2, w: hs, h: hs });
+  const s = imageToScreen(x, y), e = imageToScreen(x+w, y+h);
+  const mx = (s.x+e.x)/2, my = (s.y+e.y)/2, hs = 8;
+  const H = (cx, cy, id) => ({ id, x: cx-hs/2, y: cy-hs/2, w: hs, h: hs });
   return [
-    H(s.x, s.y, 'tl'), H(mx, s.y, 'tc'), H(e.x, s.y, 'tr'),
-    H(s.x, my, 'ml'),                     H(e.x, my, 'mr'),
-    H(s.x, e.y, 'bl'), H(mx, e.y, 'bc'), H(e.x, e.y, 'br'),
+    H(s.x,s.y,'tl'), H(mx,s.y,'tc'), H(e.x,s.y,'tr'),
+    H(s.x,my,'ml'),                   H(e.x,my,'mr'),
+    H(s.x,e.y,'bl'), H(mx,e.y,'bc'), H(e.x,e.y,'br'),
   ];
 }
 function hitHandle(sx, sy) {
   for (const h of getCropHandles())
-    if (sx >= h.x && sx <= h.x + h.w && sy >= h.y && sy <= h.y + h.h) return h.id;
+    if (sx >= h.x && sx <= h.x+h.w && sy >= h.y && sy <= h.y+h.h) return h.id;
   return null;
 }
 function insideCropRect(sx, sy) {
   const { x, y, w, h } = crop.rect;
-  const s = imageToScreen(x, y), e = imageToScreen(x + w, y + h);
+  const s = imageToScreen(x, y), e = imageToScreen(x+w, y+h);
   return sx > s.x && sx < e.x && sy > s.y && sy < e.y;
 }
 
 function drawCropOverlay() {
   if (!crop.active || crop.rect.w < 2) return;
   const { x, y, w, h } = crop.rect;
-  const s = imageToScreen(x, y), e = imageToScreen(x + w, y + h);
-  const sw = e.x - s.x, sh = e.y - s.y;
+  const s = imageToScreen(x, y), e = imageToScreen(x+w, y+h);
+  const sw = e.x-s.x, sh = e.y-s.y;
 
   ctx.save();
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, 0, canvas.width, s.y);
-  ctx.fillRect(0, e.y, canvas.width, canvas.height - e.y);
+  ctx.fillRect(0, e.y, canvas.width, canvas.height-e.y);
   ctx.fillRect(0, s.y, s.x, sh);
-  ctx.fillRect(e.x, s.y, canvas.width - e.x, sh);
+  ctx.fillRect(e.x, s.y, canvas.width-e.x, sh);
 
   ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5;
   ctx.strokeRect(s.x, s.y, sw, sh);
 
   ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 0.5;
   for (let i = 1; i < 3; i++) {
-    ctx.beginPath(); ctx.moveTo(s.x + sw * i/3, s.y); ctx.lineTo(s.x + sw * i/3, e.y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(s.x, s.y + sh * i/3); ctx.lineTo(e.x, s.y + sh * i/3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s.x+sw*i/3, s.y); ctx.lineTo(s.x+sw*i/3, e.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s.x, s.y+sh*i/3); ctx.lineTo(e.x, s.y+sh*i/3); ctx.stroke();
   }
 
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5;
   const ca = 14;
-  [[s.x, s.y, 1, 1],[e.x, s.y,-1, 1],[s.x, e.y, 1,-1],[e.x, e.y,-1,-1]].forEach(([cx, cy, dx, dy]) => {
-    ctx.beginPath(); ctx.moveTo(cx + dx*ca, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + dy*ca); ctx.stroke();
+  [[s.x,s.y,1,1],[e.x,s.y,-1,1],[s.x,e.y,1,-1],[e.x,e.y,-1,-1]].forEach(([cx,cy,dx,dy]) => {
+    ctx.beginPath(); ctx.moveTo(cx+dx*ca,cy); ctx.lineTo(cx,cy); ctx.lineTo(cx,cy+dy*ca); ctx.stroke();
   });
 
   ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
-  getCropHandles().forEach(h => { ctx.fillRect(h.x, h.y, h.w, h.h); ctx.strokeRect(h.x, h.y, h.w, h.h); });
+  getCropHandles().forEach(h => { ctx.fillRect(h.x,h.y,h.w,h.h); ctx.strokeRect(h.x,h.y,h.w,h.h); });
 
   const label = `${Math.round(w)} × ${Math.round(h)}`;
   ctx.font = '12px system-ui,sans-serif';
   const lw = ctx.measureText(label).width + 12;
-  ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(s.x, s.y - 22, lw, 18);
-  ctx.fillStyle = '#fff'; ctx.fillText(label, s.x + 6, s.y - 8);
+  ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(s.x, s.y-22, lw, 18);
+  ctx.fillStyle = '#fff'; ctx.fillText(label, s.x+6, s.y-8);
   ctx.restore();
 }
 
 const HANDLE_CURSORS = {
-  tl: 'nw-resize', tc: 'n-resize',  tr: 'ne-resize',
-  ml: 'w-resize',                    mr: 'e-resize',
-  bl: 'sw-resize', bc: 's-resize',  br: 'se-resize',
+  tl:'nw-resize', tc:'n-resize',  tr:'ne-resize',
+  ml:'w-resize',                   mr:'e-resize',
+  bl:'sw-resize', bc:'s-resize',  br:'se-resize',
 };
 
 function applyCrop() {
   if (!crop.active || crop.rect.w < 2 || crop.rect.h < 2) return;
   const { x, y, w, h } = crop.rect;
   const nv = document.createElement('canvas');
-  nv.width  = Math.round(w); nv.height = Math.round(h);
+  nv.width = Math.round(w); nv.height = Math.round(h);
   const nc = nv.getContext('2d', { willReadFrequently: true });
   nc.drawImage(offscreen, Math.round(x), Math.round(y), Math.round(w), Math.round(h), 0, 0, Math.round(w), Math.round(h));
   offscreen = nv; offscreenCtx = nc;
@@ -518,7 +827,7 @@ function applyCrop() {
 }
 
 function deactivateCrop() {
-  crop.active = false; crop.dragging = false; crop.rect = { x: 0, y: 0, w: 0, h: 0 };
+  crop.active = false; crop.dragging = false; crop.rect = { x:0, y:0, w:0, h:0 };
   canvas.style.cursor = 'crosshair';
   const cc = document.getElementById('cropControls');
   if (cc) cc.style.display = 'none';
@@ -550,7 +859,7 @@ function applyFineRotation(degrees) { state.params.rotation = degrees; scheduleR
 function flipCanvas(horizontal) {
   const tmp = document.createElement('canvas');
   tmp.width = offscreen.width; tmp.height = offscreen.height;
-  const tc  = tmp.getContext('2d');
+  const tc  = tmp.getContext('2d', { willReadFrequently: true });
   tc.translate(horizontal ? offscreen.width : 0, horizontal ? 0 : offscreen.height);
   tc.scale(horizontal ? -1 : 1, horizontal ? 1 : -1);
   tc.drawImage(offscreen, 0, 0);
@@ -572,11 +881,9 @@ function processPixels(srcData) {
   const saturation = p.saturation / 100;
   const highlights = p.highlights * 0.6;
   const shadows    = p.shadows    * 0.6;
+  const cVal       = p.contrast;
+  const cFactor    = cVal !== 0 ? (259*(cVal+255))/(255*(259-cVal)) : 1;
 
-  const cVal    = p.contrast;
-  const cFactor = cVal !== 0 ? (259 * (cVal + 255)) / (255 * (259 - cVal)) : 1;
-
-  // LUT: brightness + exposure + contrast
   const lut = new Uint8ClampedArray(256);
   for (let i = 0; i < 256; i++) {
     let v = i + exposure + brightness;
@@ -589,31 +896,27 @@ function processPixels(srcData) {
     band => band.hue !== 0 || band.sat !== 0 || band.lum !== 0
   );
 
-  // Per-pixel loop
   for (let i = 0; i < len; i += 4) {
-    let r = lut[data[i]];
-    let g = lut[data[i + 1]];
-    let b = lut[data[i + 2]];
-
-    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    let r = lut[data[i]], g = lut[data[i+1]], b = lut[data[i+2]];
+    const luma = 0.299*r + 0.587*g + 0.114*b;
 
     if (highlights !== 0) {
-      const w = Math.max(0, (luma - 128) / 127);
-      r += highlights * w; g += highlights * w; b += highlights * w;
+      const w = Math.max(0, (luma-128)/127);
+      r += highlights*w; g += highlights*w; b += highlights*w;
     }
     if (shadows !== 0) {
-      const w = Math.max(0, (128 - luma) / 128);
-      r += shadows * w; g += shadows * w; b += shadows * w;
+      const w = Math.max(0, (128-luma)/128);
+      r += shadows*w; g += shadows*w; b += shadows*w;
     }
     if (state._wbMatrix && (p.temperature !== 0 || p.tint !== 0)) {
       const wb = applyWbMatrix(r, g, b, state._wbMatrix);
       r = wb.r; g = wb.g; b = wb.b;
     }
     if (saturation !== 0) {
-      const grey = 0.299 * r + 0.587 * g + 0.114 * b;
-      r = grey + (r - grey) * (1 + saturation);
-      g = grey + (g - grey) * (1 + saturation);
-      b = grey + (b - grey) * (1 + saturation);
+      const grey = 0.299*r + 0.587*g + 0.114*b;
+      r = grey+(r-grey)*(1+saturation);
+      g = grey+(g-grey)*(1+saturation);
+      b = grey+(b-grey)*(1+saturation);
     }
     if (hasHslEdits) {
       const res = applyHslToPixel(r, g, b, hslParams);
@@ -624,22 +927,23 @@ function processPixels(srcData) {
       r = res.r; g = res.g; b = res.b;
     }
 
-    data[i]     = Math.max(0, Math.min(255, r));
-    data[i + 1] = Math.max(0, Math.min(255, g));
-    data[i + 2] = Math.max(0, Math.min(255, b));
+    data[i]   = Math.max(0, Math.min(255, r));
+    data[i+1] = Math.max(0, Math.min(255, g));
+    data[i+2] = Math.max(0, Math.min(255, b));
   }
 
   let result = new ImageData(data, srcData.width, srcData.height);
 
-  // Noise reduction (before sharpening)
-  if (p.noise_reduction > 0) {
-    result = applyNoiseReduction(result, p.noise_reduction, p.noise_detail ?? 50, p.noise_contrast ?? 0);
-  }
+  // Tone curves
+  result = applyCurves(result);
 
-  // Sharpening (last step)
-  if (p.sharpness > 0) {
+  // Noise reduction
+  if (p.noise_reduction > 0)
+    result = applyNoiseReduction(result, p.noise_reduction, p.noise_detail ?? 50, p.noise_contrast ?? 0);
+
+  // Sharpening
+  if (p.sharpness > 0)
     result = applySharpen(result, p.sharpness, p.sharpen_radius ?? 1, p.sharpen_detail ?? 25);
-  }
 
   return result;
 }
@@ -664,9 +968,7 @@ function redraw() {
   if (rotation !== 0) {
     const cx = state.offsetX + (offscreen.width  * state.zoom) / 2;
     const cy = state.offsetY + (offscreen.height * state.zoom) / 2;
-    ctx.translate(cx, cy);
-    ctx.rotate(rotation * Math.PI / 180);
-    ctx.translate(-cx, -cy);
+    ctx.translate(cx, cy); ctx.rotate(rotation * Math.PI / 180); ctx.translate(-cx, -cy);
   }
 
   ctx.translate(state.offsetX, state.offsetY);
@@ -675,12 +977,15 @@ function redraw() {
   const srcData   = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
   const processed = processPixels(srcData);
 
-  if (!state._tmpCanvas) {
+  // Reuse temp canvas — only recreate when size changes (fixes the bug in your version)
+  if (!state._tmpCanvas ||
+      state._tmpCanvas.width !== offscreen.width ||
+      state._tmpCanvas.height !== offscreen.height) {
     state._tmpCanvas = document.createElement('canvas');
-    state._tmpCtx    = state._tmpCanvas.getContext('2d');
+    state._tmpCanvas.width  = offscreen.width;
+    state._tmpCanvas.height = offscreen.height;
+    state._tmpCtx = state._tmpCanvas.getContext('2d', { willReadFrequently: true });
   }
-  state._tmpCanvas = document.createElement('canvas');
-  state._tmpCtx    = state._tmpCanvas.getContext('2d', { willReadFrequently: true });
   state._tmpCtx.putImageData(processed, 0, 0);
   ctx.drawImage(state._tmpCanvas, 0, 0);
 
@@ -707,13 +1012,11 @@ function drawCheckerboard() {
 // ═══════════════════════════════════════════
 function fitToScreen() {
   if (!state.imageLoaded) return;
-  const area    = canvasArea.getBoundingClientRect();
-  const padding = 80;
-  state.zoom    = Math.min((area.width - padding) / offscreen.width, (area.height - padding) / offscreen.height, 1);
+  const area    = canvasArea.getBoundingClientRect(), pad = 80;
+  state.zoom    = Math.min((area.width-pad)/offscreen.width, (area.height-pad)/offscreen.height, 1);
   state.offsetX = (area.width  - offscreen.width  * state.zoom) / 2;
   state.offsetY = (area.height - offscreen.height * state.zoom) / 2;
-  updateZoomLabel();
-  redraw();
+  updateZoomLabel(); redraw();
 }
 
 function zoomTo(newZoom, originX, originY) {
@@ -721,9 +1024,7 @@ function zoomTo(newZoom, originX, originY) {
   const ratio   = newZoom / state.zoom;
   state.offsetX = originX - ratio * (originX - state.offsetX);
   state.offsetY = originY - ratio * (originY - state.offsetY);
-  state.zoom    = newZoom;
-  updateZoomLabel();
-  redraw();
+  state.zoom    = newZoom; updateZoomLabel(); redraw();
 }
 
 function updateZoomLabel() { zoomLabel.textContent = Math.round(state.zoom * 100) + '%'; }
@@ -731,18 +1032,12 @@ function updateZoomLabel() { zoomLabel.textContent = Math.round(state.zoom * 100
 // ═══════════════════════════════════════════
 //  HISTOGRAM
 // ═══════════════════════════════════════════
-function drawHistogram() {
-  clearTimeout(histTimer);
-  histTimer = setTimeout(_drawHistogram, 60);
-}
+function drawHistogram() { clearTimeout(histTimer); histTimer = setTimeout(_drawHistogram, 60); }
 
 function _drawHistogram() {
   if (!state.imageLoaded) return;
-  const hCanvas = document.getElementById('histogramCanvas');
-  if (!hCanvas) return;
-  const hCtx = hCanvas.getContext('2d');
-  const w = hCanvas.width, h = hCanvas.height;
-
+  const hCanvas = document.getElementById('histogramCanvas'); if (!hCanvas) return;
+  const hCtx = hCanvas.getContext('2d'), w = hCanvas.width, h = hCanvas.height;
   const data  = processPixels(offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height)).data;
   const rB = new Uint32Array(256), gB = new Uint32Array(256);
   const bB = new Uint32Array(256), lB = new Uint32Array(256);
@@ -751,7 +1046,6 @@ function _drawHistogram() {
     rB[data[i]]++; gB[data[i+1]]++; bB[data[i+2]]++;
     lB[Math.round(0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2])]++;
   }
-
   const max = Math.max(...Array.from(rB), ...Array.from(gB), ...Array.from(bB), ...Array.from(lB));
   hCtx.clearRect(0, 0, w, h);
 
@@ -772,38 +1066,26 @@ function _drawHistogram() {
 // ═══════════════════════════════════════════
 function bindSliders() {
   document.querySelectorAll('.adj-slider:not(.hsl-slider)').forEach(slider => {
-    const valEl = slider.nextElementSibling;
-    const row   = slider.closest('.slider-row');
+    const valEl = slider.nextElementSibling, row = slider.closest('.slider-row');
 
     slider.addEventListener('input', () => {
-      const param = slider.dataset.param;
-      if (!param) return;
-      const value = parseInt(slider.value);
-      state.params[param] = value;
+      const param = slider.dataset.param; if (!param) return;
+      const value = parseInt(slider.value); state.params[param] = value;
       valEl.textContent = value > 0 ? `+${value}` : `${value}`;
       valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
       row.classList.toggle('slider-row--active', value !== 0);
-      updateSliderTrack(slider);
-      scheduleRedraw();
-      drawHistogram();
+      updateSliderTrack(slider); scheduleRedraw(); drawHistogram();
     });
-
     slider.addEventListener('change', pushHistory);
 
     const label = row.querySelector('label');
     if (label) {
-      label.style.cursor = 'pointer';
-      label.title        = 'Double-click to reset';
+      label.style.cursor = 'pointer'; label.title = 'Double-click to reset';
       label.addEventListener('dblclick', () => {
-        slider.value = 0;
-        state.params[slider.dataset.param] = 0;
-        valEl.textContent = '0';
-        valEl.style.color = 'var(--text-muted)';
-        row.classList.remove('slider-row--active');
-        updateSliderTrack(slider);
-        scheduleRedraw();
-        drawHistogram();
-        pushHistory();
+        slider.value = 0; state.params[slider.dataset.param] = 0;
+        valEl.textContent = '0'; valEl.style.color = 'var(--text-muted)';
+        row.classList.remove('slider-row--active'); updateSliderTrack(slider);
+        scheduleRedraw(); drawHistogram(); pushHistory();
       });
     }
   });
@@ -812,12 +1094,11 @@ function bindSliders() {
 function updateSliderTrack(slider) {
   const min = parseInt(slider.min), max = parseInt(slider.max), val = parseInt(slider.value);
   if (min < 0) {
-    const center = (0 - min) / (max - min) * 100;
-    const pos    = (val - min) / (max - min) * 100;
-    const left   = Math.min(center, pos), width = Math.abs(pos - center);
+    const center = (0-min)/(max-min)*100, pos = (val-min)/(max-min)*100;
+    const left = Math.min(center, pos), width = Math.abs(pos-center);
     slider.style.background = `linear-gradient(to right,var(--bg-3) 0%,var(--bg-3) ${left}%,var(--accent) ${left}%,var(--accent) ${left+width}%,var(--bg-3) ${left+width}%,var(--bg-3) 100%)`;
   } else {
-    const pct = max > 0 ? (val / max) * 100 : 0;
+    const pct = max > 0 ? (val/max)*100 : 0;
     slider.style.background = `linear-gradient(to right,var(--accent) 0%,var(--accent) ${pct}%,var(--bg-3) ${pct}%,var(--bg-3) 100%)`;
   }
 }
@@ -828,27 +1109,22 @@ function initSliderTracks() { document.querySelectorAll('.adj-slider').forEach(u
 //  HSL TABS
 // ═══════════════════════════════════════════
 function bindHslTabs() {
-  const tabs    = document.querySelectorAll('.hsl-tab');
-  const sliders = document.querySelectorAll('.hsl-slider');
+  const tabs = document.querySelectorAll('.hsl-tab'), sliders = document.querySelectorAll('.hsl-slider');
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
+      tabs.forEach(t => t.classList.remove('active')); tab.classList.add('active');
       activeHueBand = tab.dataset.hue;
 
       if (activeHueBand === 'all') {
         sliders.forEach(s => {
-          s.value = 0;
-          s.nextElementSibling.textContent = '0';
-          s.nextElementSibling.style.color = 'var(--text-muted)';
-          updateSliderTrack(s);
+          s.value = 0; s.nextElementSibling.textContent = '0';
+          s.nextElementSibling.style.color = 'var(--text-muted)'; updateSliderTrack(s);
         });
       } else {
         const band = state.params.hsl[activeHueBand];
         sliders.forEach(s => {
-          const key = s.dataset.hsl, value = band[key];
-          s.value = value;
+          const key = s.dataset.hsl, value = band[key]; s.value = value;
           s.nextElementSibling.textContent = value > 0 ? `+${value}` : `${value}`;
           s.nextElementSibling.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
           updateSliderTrack(s);
@@ -859,43 +1135,25 @@ function bindHslTabs() {
 
   sliders.forEach(slider => {
     const valEl = slider.nextElementSibling;
-
     slider.addEventListener('input', () => {
       const key = slider.dataset.hsl, value = parseInt(slider.value);
-      if (activeHueBand === 'all') {
-        Object.keys(state.params.hsl).forEach(b => { state.params.hsl[b][key] = value; });
-      } else {
-        state.params.hsl[activeHueBand][key] = value;
-      }
+      if (activeHueBand === 'all') Object.keys(state.params.hsl).forEach(b => { state.params.hsl[b][key] = value; });
+      else state.params.hsl[activeHueBand][key] = value;
       valEl.textContent = value > 0 ? `+${value}` : `${value}`;
       valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
-      updateSliderTrack(slider);
-      updateHslDots();
-      scheduleRedraw();
-      drawHistogram();
+      updateSliderTrack(slider); updateHslDots(); scheduleRedraw(); drawHistogram();
     });
-
     slider.addEventListener('change', pushHistory);
 
     const label = slider.closest('.slider-row')?.querySelector('label');
     if (label) {
-      label.style.cursor = 'pointer';
-      label.title        = 'Double-click to reset';
+      label.style.cursor = 'pointer'; label.title = 'Double-click to reset';
       label.addEventListener('dblclick', () => {
-        const key = slider.dataset.hsl;
-        slider.value = 0;
-        valEl.textContent = '0';
-        valEl.style.color = 'var(--text-muted)';
-        if (activeHueBand === 'all') {
-          Object.keys(state.params.hsl).forEach(b => { state.params.hsl[b][key] = 0; });
-        } else {
-          state.params.hsl[activeHueBand][key] = 0;
-        }
-        updateSliderTrack(slider);
-        updateHslDots();
-        scheduleRedraw();
-        drawHistogram();
-        pushHistory();
+        const key = slider.dataset.hsl; slider.value = 0;
+        valEl.textContent = '0'; valEl.style.color = 'var(--text-muted)';
+        if (activeHueBand === 'all') Object.keys(state.params.hsl).forEach(b => { state.params.hsl[b][key] = 0; });
+        else state.params.hsl[activeHueBand][key] = 0;
+        updateSliderTrack(slider); updateHslDots(); scheduleRedraw(); drawHistogram(); pushHistory();
       });
     }
   });
@@ -915,43 +1173,33 @@ function pushHistory() {
   state.history = state.history.slice(0, state.historyIndex + 1);
   state.history.push({
     ...state.params,
-    hsl: JSON.parse(JSON.stringify(state.params.hsl)),
+    hsl:   JSON.parse(JSON.stringify(state.params.hsl)),
+    curve: JSON.parse(JSON.stringify(state.params.curve)),
   });
   if (state.history.length > state.maxHistory) state.history.shift();
   state.historyIndex = state.history.length - 1;
-  updateHistoryBtns();
-  updateHistoryPanel();
-  autoSave();
+  updateHistoryBtns(); updateHistoryPanel(); autoSave();
 }
 
-function undo() {
-  if (state.historyIndex <= 0) return;
-  state.historyIndex--;
-  restoreHistory(state.history[state.historyIndex]);
-}
-
-function redo() {
-  if (state.historyIndex >= state.history.length - 1) return;
-  state.historyIndex++;
-  restoreHistory(state.history[state.historyIndex]);
-}
+function undo() { if (state.historyIndex <= 0) return; state.historyIndex--; restoreHistory(state.history[state.historyIndex]); }
+function redo() { if (state.historyIndex >= state.history.length-1) return; state.historyIndex++; restoreHistory(state.history[state.historyIndex]); }
 
 function restoreHistory(params) {
-  state.params = { ...params, hsl: JSON.parse(JSON.stringify(params.hsl)) };
-  syncSliders();
-  updateHslDots();
-  redraw();
-  drawHistogram();
-  updateHistoryBtns();
-  updateHistoryPanel(); // ← fixed: was missing
+  state.params = {
+    ...params,
+    hsl:   JSON.parse(JSON.stringify(params.hsl)),
+    curve: JSON.parse(JSON.stringify(params.curve || state.params.curve)),
+  };
+  syncSliders(); updateHslDots();
+  if (curveCanvas) drawCurveCanvas();
+  redraw(); drawHistogram(); updateHistoryBtns(); updateHistoryPanel();
 }
 
 function syncSliders() {
   document.querySelectorAll('.adj-slider:not(.hsl-slider)').forEach(slider => {
     const param = slider.dataset.param;
     if (!param || state.params[param] === undefined) return;
-    const value = state.params[param];
-    slider.value = value;
+    const value = state.params[param]; slider.value = value;
     const valEl = slider.nextElementSibling;
     valEl.textContent = value > 0 ? `+${value}` : `${value}`;
     valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
@@ -968,8 +1216,7 @@ function syncSliders() {
   if (activeHueBand !== 'all') {
     const band = state.params.hsl[activeHueBand];
     document.querySelectorAll('.hsl-slider').forEach(s => {
-      const key = s.dataset.hsl, value = band[key];
-      s.value = value;
+      const key = s.dataset.hsl, value = band[key]; s.value = value;
       s.nextElementSibling.textContent = value > 0 ? `+${value}` : `${value}`;
       s.nextElementSibling.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
       updateSliderTrack(s);
@@ -984,27 +1231,32 @@ function updateHistoryBtns() {
 }
 
 // ═══════════════════════════════════════════
-//  HISTORY PANEL — visual step list
+//  HISTORY PANEL
 // ═══════════════════════════════════════════
 const PARAM_LABELS = {
-  brightness: 'Brightness', contrast: 'Contrast', exposure: 'Exposure',
-  highlights: 'Highlights', shadows: 'Shadows', saturation: 'Saturation',
-  vibrance: 'Vibrance', temperature: 'Temperature', tint: 'Tint',
-  sharpness: 'Sharpening', sharpen_radius: 'Sharpen Radius', sharpen_detail: 'Sharpen Detail',
-  noise_reduction: 'Noise Reduction', noise_detail: 'NR Detail', noise_contrast: 'NR Contrast',
-  vignette: 'Vignette', grain: 'Grain', rotation: 'Rotation',
+  brightness:'Brightness', contrast:'Contrast', exposure:'Exposure',
+  highlights:'Highlights', shadows:'Shadows', saturation:'Saturation',
+  vibrance:'Vibrance', temperature:'Temperature', tint:'Tint',
+  sharpness:'Sharpening', sharpen_radius:'Sharpen Radius', sharpen_detail:'Sharpen Detail',
+  noise_reduction:'Noise Reduction', noise_detail:'NR Detail', noise_contrast:'NR Contrast',
+  vignette:'Vignette', grain:'Grain', rotation:'Rotation',
 };
 
 function describeChange(prev, curr) {
   if (!prev) return 'Original';
-  for (const [key, label] of Object.entries(PARAM_LABELS)) {
+  for (const [key, label] of Object.entries(PARAM_LABELS))
     if (prev[key] !== curr[key]) return label;
-  }
   for (const band of Object.keys(curr.hsl || {})) {
-    const pb = prev.hsl?.[band] || { hue: 0, sat: 0, lum: 0 };
-    const cb = curr.hsl?.[band] || { hue: 0, sat: 0, lum: 0 };
+    const pb = prev.hsl?.[band] || { hue:0, sat:0, lum:0 };
+    const cb = curr.hsl?.[band] || { hue:0, sat:0, lum:0 };
     if (pb.hue !== cb.hue || pb.sat !== cb.sat || pb.lum !== cb.lum)
       return `HSL ${band.charAt(0).toUpperCase() + band.slice(1)}`;
+  }
+  // Check curve changes
+  for (const ch of ['luma','r','g','b']) {
+    const pc = JSON.stringify(prev.curve?.[ch]);
+    const cc = JSON.stringify(curr.curve?.[ch]);
+    if (pc !== cc) return `Curve ${ch === 'luma' ? 'RGB' : ch.toUpperCase()}`;
   }
   if (prev.crop !== curr.crop) return 'Crop';
   if (prev.flipH !== curr.flipH) return 'Flip H';
@@ -1013,18 +1265,18 @@ function describeChange(prev, curr) {
 }
 
 function updateHistoryPanel() {
-  const list = document.getElementById('historyList');
-  if (!list) return;
+  const list = document.getElementById('historyList'); if (!list) return;
   list.innerHTML = '';
 
   state.history.forEach((entry, index) => {
-    const label    = describeChange(state.history[index - 1] || null, entry);
+    const label    = describeChange(state.history[index-1] || null, entry);
     const isActive = index === state.historyIndex;
     const icon     = index === 0 ? '◉'
       : label.includes('Crop')   ? '⊡'
       : label.includes('Rotate') ? '↻'
       : label.includes('Flip')   ? '⇔'
       : label.includes('HSL')    ? '◉'
+      : label.includes('Curve')  ? '〜'
       : label.includes('Sharp')  ? '◈'
       : label.includes('Noise')  ? '≋'
       : label.includes('Temp') || label.includes('Tint') ? '⬡'
@@ -1037,10 +1289,7 @@ function updateHistoryPanel() {
       <span class="history-label">${label}</span>
       <span class="history-step">${index}</span>
     `;
-    item.addEventListener('click', () => {
-      state.historyIndex = index;
-      restoreHistory(state.history[index]);
-    });
+    item.addEventListener('click', () => { state.historyIndex = index; restoreHistory(state.history[index]); });
     list.appendChild(item);
   });
 
@@ -1056,7 +1305,11 @@ function buildStateSnapshot() {
     version:   '1.0',
     timestamp: new Date().toISOString(),
     imageName: typeof IMAGE_NAME !== 'undefined' ? IMAGE_NAME : 'unknown',
-    params: { ...state.params, hsl: JSON.parse(JSON.stringify(state.params.hsl)) },
+    params: {
+      ...state.params,
+      hsl:   JSON.parse(JSON.stringify(state.params.hsl)),
+      curve: JSON.parse(JSON.stringify(state.params.curve)),
+    },
   };
 }
 
@@ -1066,10 +1319,8 @@ function saveStateToFile() {
   const url      = URL.createObjectURL(blob);
   const a        = document.createElement('a');
   const name     = typeof IMAGE_NAME !== 'undefined' ? IMAGE_NAME : 'pixloft';
-  a.href         = url;
-  a.download     = name.replace(/\.[^.]+$/, '') + '.pixloft.json';
-  a.click();
-  URL.revokeObjectURL(url);
+  a.href = url; a.download = name.replace(/\.[^.]+$/, '') + '.pixloft.json';
+  a.click(); URL.revokeObjectURL(url);
   showHint(`State saved → ${a.download}`);
 }
 
@@ -1082,10 +1333,12 @@ function loadStateFromFile(file) {
       state.params = {
         ...state.params,
         ...snapshot.params,
-        hsl: JSON.parse(JSON.stringify(snapshot.params.hsl || state.params.hsl)),
+        hsl:   JSON.parse(JSON.stringify(snapshot.params.hsl   || state.params.hsl)),
+        curve: JSON.parse(JSON.stringify(snapshot.params.curve || state.params.curve)),
       };
-      syncSliders(); updateHslDots(); redraw(); drawHistogram();
-      pushHistory(); updateHistoryPanel();
+      syncSliders(); updateHslDots();
+      if (curveCanvas) drawCurveCanvas();
+      redraw(); drawHistogram(); pushHistory(); updateHistoryPanel();
       showHint(`State loaded from ${file.name}`);
     } catch (err) {
       showHint('⚠ Could not parse state file');
@@ -1099,9 +1352,8 @@ function loadStateFromFile(file) {
 //  AUTO-SAVE TO LOCALSTORAGE
 // ═══════════════════════════════════════════
 function autoSave() {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(buildStateSnapshot()));
-  } catch (e) { /* quota exceeded — ignore */ }
+  try { localStorage.setItem(LS_KEY, JSON.stringify(buildStateSnapshot())); }
+  catch (e) { /* quota exceeded */ }
 }
 
 function autoLoad() {
@@ -1113,7 +1365,8 @@ function autoLoad() {
     state.params = {
       ...state.params,
       ...snapshot.params,
-      hsl: JSON.parse(JSON.stringify(snapshot.params.hsl || state.params.hsl)),
+      hsl:   JSON.parse(JSON.stringify(snapshot.params.hsl   || state.params.hsl)),
+      curve: JSON.parse(JSON.stringify(snapshot.params.curve || state.params.curve)),
     };
     return true;
   } catch (e) { return false; }
@@ -1128,39 +1381,32 @@ function resetToOriginal() {
   offscreen        = document.createElement('canvas');
   offscreen.width  = state.originalImage.naturalWidth;
   offscreen.height = state.originalImage.naturalHeight;
-  offscreenCtx = offscreen.getContext('2d', { willReadFrequently: true });
+  offscreenCtx     = offscreen.getContext('2d', { willReadFrequently: true });
   offscreenCtx.drawImage(state.originalImage, 0, 0);
 
   Object.keys(state.params).forEach(k => {
-    if (k === 'hsl')  return;
+    if (k === 'hsl' || k === 'curve') return;
     if (k === 'flipH' || k === 'flipV') { state.params[k] = false; return; }
     if (k === 'crop') { state.params[k] = null; return; }
     state.params[k] = 0;
   });
-  Object.keys(state.params.hsl).forEach(band => {
-    state.params.hsl[band] = { hue: 0, sat: 0, lum: 0 };
-  });
+  Object.keys(state.params.hsl).forEach(band => { state.params.hsl[band] = { hue:0, sat:0, lum:0 }; });
+  Object.keys(state.params.curve).forEach(ch => { state.params.curve[ch] = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]]; });
 
   if (rotSlider) { rotSlider.value = 0; updateSliderTrack(rotSlider); }
   if (rotVal)    rotVal.textContent = '0°';
 
   document.querySelectorAll('.hsl-slider').forEach(s => {
-    s.value = 0;
-    s.nextElementSibling.textContent = '0';
-    s.nextElementSibling.style.color = 'var(--text-muted)';
-    updateSliderTrack(s);
+    s.value = 0; s.nextElementSibling.textContent = '0';
+    s.nextElementSibling.style.color = 'var(--text-muted)'; updateSliderTrack(s);
   });
 
+  if (curveCanvas) drawCurveCanvas();
   try { localStorage.removeItem(LS_KEY); } catch (e) {}
 
   syncSliders(); updateHslDots(); fitToScreen(); redraw(); drawHistogram();
-
-  state.history      = [];
-  state.historyIndex = -1;
-  pushHistory();
-  updateHistoryPanel();
-  updateHistoryBtns();
-
+  state.history = []; state.historyIndex = -1;
+  pushHistory(); updateHistoryPanel(); updateHistoryBtns();
   showHint('Reset to original image ◉');
 }
 
@@ -1173,130 +1419,107 @@ function bindCanvasEvents() {
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
-    zoomTo(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX - rect.left, e.clientY - rect.top);
+    zoomTo(state.zoom * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX-rect.left, e.clientY-rect.top);
   }, { passive: false });
 
   canvas.addEventListener('mousedown', e => {
     const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const sx = e.clientX-rect.left, sy = e.clientY-rect.top;
 
     if (crop.active) {
       const handle = hitHandle(sx, sy);
-      if (handle) {
-        crop.dragging = true; crop.dragHandle = handle;
-        crop.startX = sx; crop.startY = sy; crop._origRect = { ...crop.rect }; return;
-      }
-      if (insideCropRect(sx, sy)) {
-        crop.dragging = true; crop.dragHandle = 'move';
-        crop.startX = sx; crop.startY = sy; crop._origRect = { ...crop.rect };
-        canvas.style.cursor = 'move'; return;
-      }
-      const imgPt = screenToImage(sx, sy);
-      crop.dragging = true; crop.dragHandle = 'new';
-      crop.startX = sx; crop.startY = sy; crop._startImgPt = imgPt;
-      crop.rect = { x: imgPt.x, y: imgPt.y, w: 0, h: 0 }; return;
+      if (handle) { crop.dragging=true; crop.dragHandle=handle; crop.startX=sx; crop.startY=sy; crop._origRect={...crop.rect}; return; }
+      if (insideCropRect(sx, sy)) { crop.dragging=true; crop.dragHandle='move'; crop.startX=sx; crop.startY=sy; crop._origRect={...crop.rect}; canvas.style.cursor='move'; return; }
+      const imgPt = screenToImage(sx, sy); crop.dragging=true; crop.dragHandle='new';
+      crop.startX=sx; crop.startY=sy; crop._startImgPt=imgPt; crop.rect={x:imgPt.x,y:imgPt.y,w:0,h:0}; return;
     }
 
     if (e.button === 1 || state.spaceHeld) {
-      e.preventDefault();
-      state.isPanning  = true;
-      state.panStartX  = e.clientX; state.panStartY  = e.clientY;
-      state.panOriginX = state.offsetX; state.panOriginY = state.offsetY;
-      canvas.style.cursor = 'grabbing';
+      e.preventDefault(); state.isPanning=true;
+      state.panStartX=e.clientX; state.panStartY=e.clientY;
+      state.panOriginX=state.offsetX; state.panOriginY=state.offsetY;
+      canvas.style.cursor='grabbing';
     }
   });
 
   window.addEventListener('mousemove', e => {
     const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const sx = e.clientX-rect.left, sy = e.clientY-rect.top;
 
     if (crop.active && crop.dragging) {
-      const dx = sx - crop.startX, dy = sy - crop.startY;
-      const dxI = dx / state.zoom, dyI = dy / state.zoom;
-      const h = crop.dragHandle;
-      let r = { ...crop._origRect };
+      const dx=sx-crop.startX, dy=sy-crop.startY;
+      const dxI=dx/state.zoom, dyI=dy/state.zoom;
+      const h=crop.dragHandle; let r={...crop._origRect};
 
-      if (h === 'new') {
-        const ip = screenToImage(sx, sy);
-        r.x = Math.min(crop._startImgPt.x, ip.x); r.y = Math.min(crop._startImgPt.y, ip.y);
-        r.w = Math.abs(ip.x - crop._startImgPt.x); r.h = Math.abs(ip.y - crop._startImgPt.y);
-        if (crop.aspectRatio) enforceAspectRatio(r, 'tl');
-      } else if (h === 'move') {
-        r.x += dxI; r.y += dyI;
+      if (h==='new') {
+        const ip=screenToImage(sx,sy); r.x=Math.min(crop._startImgPt.x,ip.x); r.y=Math.min(crop._startImgPt.y,ip.y);
+        r.w=Math.abs(ip.x-crop._startImgPt.x); r.h=Math.abs(ip.y-crop._startImgPt.y);
+        if (crop.aspectRatio) enforceAspectRatio(r,'tl');
+      } else if (h==='move') {
+        r.x+=dxI; r.y+=dyI;
       } else {
-        if (h.includes('r')) r.w = Math.max(10, r.w + dxI);
-        if (h.includes('l')) { r.x += dxI; r.w = Math.max(10, r.w - dxI); }
-        if (h.includes('b')) r.h = Math.max(10, r.h + dyI);
-        if (h.includes('t')) { r.y += dyI; r.h = Math.max(10, r.h - dyI); }
-        if (crop.aspectRatio) enforceAspectRatio(r, h.length === 2 ? h : 'tl');
+        if (h.includes('r')) r.w=Math.max(10,r.w+dxI);
+        if (h.includes('l')) { r.x+=dxI; r.w=Math.max(10,r.w-dxI); }
+        if (h.includes('b')) r.h=Math.max(10,r.h+dyI);
+        if (h.includes('t')) { r.y+=dyI; r.h=Math.max(10,r.h-dyI); }
+        if (crop.aspectRatio) enforceAspectRatio(r, h.length===2?h:'tl');
       }
 
-      crop.rect = clampCropRect(r);
-      const cw = document.getElementById('cropW'), ch = document.getElementById('cropH');
-      if (cw) cw.value = Math.round(crop.rect.w);
-      if (ch) ch.value = Math.round(crop.rect.h);
+      crop.rect=clampCropRect(r);
+      const cw=document.getElementById('cropW'), ch=document.getElementById('cropH');
+      if (cw) cw.value=Math.round(crop.rect.w); if (ch) ch.value=Math.round(crop.rect.h);
       redraw(); return;
     }
 
     if (crop.active && !crop.dragging) {
-      const handle = hitHandle(sx, sy);
-      canvas.style.cursor = handle ? (HANDLE_CURSORS[handle] || 'pointer')
-        : insideCropRect(sx, sy) ? 'move' : 'crosshair';
+      const handle=hitHandle(sx,sy);
+      canvas.style.cursor=handle?(HANDLE_CURSORS[handle]||'pointer'):insideCropRect(sx,sy)?'move':'crosshair';
     }
 
     if (state.isPanning) {
-      state.offsetX = state.panOriginX + (e.clientX - state.panStartX);
-      state.offsetY = state.panOriginY + (e.clientY - state.panStartY);
-      redraw();
+      state.offsetX=state.panOriginX+(e.clientX-state.panStartX);
+      state.offsetY=state.panOriginY+(e.clientY-state.panStartY); redraw();
     }
   });
 
   window.addEventListener('mouseup', () => {
     if (crop.active && crop.dragging) {
-      crop.dragging = false; crop.dragHandle = null;
-      if (crop.rect.w < 0) { crop.rect.x += crop.rect.w; crop.rect.w = -crop.rect.w; }
-      if (crop.rect.h < 0) { crop.rect.y += crop.rect.h; crop.rect.h = -crop.rect.h; }
-      crop.rect = clampCropRect(crop.rect); redraw(); return;
+      crop.dragging=false; crop.dragHandle=null;
+      if (crop.rect.w<0) { crop.rect.x+=crop.rect.w; crop.rect.w=-crop.rect.w; }
+      if (crop.rect.h<0) { crop.rect.y+=crop.rect.h; crop.rect.h=-crop.rect.h; }
+      crop.rect=clampCropRect(crop.rect); redraw(); return;
     }
-    if (state.isPanning) {
-      state.isPanning     = false;
-      canvas.style.cursor = state.spaceHeld ? 'grab' : 'crosshair';
-    }
+    if (state.isPanning) { state.isPanning=false; canvas.style.cursor=state.spaceHeld?'grab':'crosshair'; }
   });
 
-  let lastPinch = null;
-  canvas.addEventListener('touchstart', e => {
-    if (e.touches.length === 2) lastPinch = pinchDist(e);
-  }, { passive: true });
+  let lastPinch=null;
+  canvas.addEventListener('touchstart', e => { if (e.touches.length===2) lastPinch=pinchDist(e); }, {passive:true});
   canvas.addEventListener('touchmove', e => {
-    if (e.touches.length !== 2) return;
-    e.preventDefault();
-    const d = pinchDist(e), rect = canvas.getBoundingClientRect();
-    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-    zoomTo(state.zoom * d / lastPinch, cx, cy); lastPinch = d;
-  }, { passive: false });
+    if (e.touches.length!==2) return; e.preventDefault();
+    const d=pinchDist(e), rect=canvas.getBoundingClientRect();
+    const cx=(e.touches[0].clientX+e.touches[1].clientX)/2-rect.left;
+    const cy=(e.touches[0].clientY+e.touches[1].clientY)/2-rect.top;
+    zoomTo(state.zoom*d/lastPinch,cx,cy); lastPinch=d;
+  }, {passive:false});
 
   canvas.addEventListener('dblclick', e => {
     if (crop.active) return;
-    const rect = canvas.getBoundingClientRect();
-    zoomTo(state.zoom < 1.5 ? 2 : 1, e.clientX - rect.left, e.clientY - rect.top);
+    const rect=canvas.getBoundingClientRect();
+    zoomTo(state.zoom<1.5?2:1, e.clientX-rect.left, e.clientY-rect.top);
   });
 }
 
 function pinchDist(e) {
-  const dx = e.touches[0].clientX - e.touches[1].clientX;
-  const dy = e.touches[0].clientY - e.touches[1].clientY;
-  return Math.sqrt(dx*dx + dy*dy);
+  const dx=e.touches[0].clientX-e.touches[1].clientX;
+  const dy=e.touches[0].clientY-e.touches[1].clientY;
+  return Math.sqrt(dx*dx+dy*dy);
 }
 
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && e.target.tagName !== 'INPUT') {
-    e.preventDefault(); state.spaceHeld = true; canvas.style.cursor = 'grab';
-  }
+  if (e.code==='Space' && e.target.tagName!=='INPUT') { e.preventDefault(); state.spaceHeld=true; canvas.style.cursor='grab'; }
 });
 window.addEventListener('keyup', e => {
-  if (e.code === 'Space') { state.spaceHeld = false; canvas.style.cursor = 'crosshair'; }
+  if (e.code==='Space') { state.spaceHeld=false; canvas.style.cursor='crosshair'; }
 });
 
 // ═══════════════════════════════════════════
@@ -1306,90 +1529,48 @@ function bindTools() {
   document.querySelectorAll('.tool-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      state.activeTool = btn.dataset.tool;
-      const cc = document.getElementById('cropControls'), rc = document.getElementById('rotateControls');
-      if (cc) cc.style.display = 'none'; if (rc) rc.style.display = 'none';
+      btn.classList.add('active'); state.activeTool=btn.dataset.tool;
+      const cc=document.getElementById('cropControls'), rc=document.getElementById('rotateControls');
+      if (cc) cc.style.display='none'; if (rc) rc.style.display='none';
 
-      if (state.activeTool === 'crop') {
-        if (cc) cc.style.display = 'block';
-        crop.active = true; canvas.style.cursor = 'crosshair';
-        showHint('Draw crop area · Drag handles to resize');
-      } else if (state.activeTool === 'rotate') {
-        if (rc) rc.style.display = 'block';
-        if (crop.active) deactivateCrop();
-        showHint('Rotate or flip the image');
-      } else {
-        if (crop.active) deactivateCrop();
-        canvas.style.cursor = 'crosshair';
-      }
+      if (state.activeTool==='crop') { if (cc) cc.style.display='block'; crop.active=true; canvas.style.cursor='crosshair'; showHint('Draw crop area · Drag handles to resize'); }
+      else if (state.activeTool==='rotate') { if (rc) rc.style.display='block'; if (crop.active) deactivateCrop(); showHint('Rotate or flip the image'); }
+      else { if (crop.active) deactivateCrop(); canvas.style.cursor='crosshair'; }
     });
   });
 
   document.querySelectorAll('.crop-ratio').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.crop-ratio').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const ratio = btn.dataset.ratio;
-      crop.aspectRatio = ratio === 'free' ? null : (() => {
-        const p = ratio.split(':'); return parseInt(p[0]) / parseInt(p[1]);
-      })();
-      if (crop.rect.w > 0) {
-        crop.rect = clampCropRect(enforceAspectRatio({ ...crop.rect }, 'tl'));
-        const cw = document.getElementById('cropW'), ch = document.getElementById('cropH');
-        if (cw) cw.value = Math.round(crop.rect.w);
-        if (ch) ch.value = Math.round(crop.rect.h);
-        redraw();
-      }
+      document.querySelectorAll('.crop-ratio').forEach(b => b.classList.remove('active')); btn.classList.add('active');
+      const ratio=btn.dataset.ratio;
+      crop.aspectRatio=ratio==='free'?null:(()=>{ const p=ratio.split(':'); return parseInt(p[0])/parseInt(p[1]); })();
+      if (crop.rect.w>0) { crop.rect=clampCropRect(enforceAspectRatio({...crop.rect},'tl')); const cw=document.getElementById('cropW'),ch=document.getElementById('cropH'); if (cw) cw.value=Math.round(crop.rect.w); if (ch) ch.value=Math.round(crop.rect.h); redraw(); }
     });
   });
 
-  const cwEl = document.getElementById('cropW'), chEl = document.getElementById('cropH');
-  if (cwEl) cwEl.addEventListener('change', e => {
-    const w = parseInt(e.target.value); if (!w || w < 1) return;
-    crop.rect.w = Math.min(w, offscreen.width - crop.rect.x);
-    if (crop.aspectRatio) crop.rect.h = crop.rect.w / crop.aspectRatio;
-    if (chEl) chEl.value = Math.round(crop.rect.h);
-    crop.rect = clampCropRect(crop.rect); redraw();
-  });
-  if (chEl) chEl.addEventListener('change', e => {
-    const h = parseInt(e.target.value); if (!h || h < 1) return;
-    crop.rect.h = Math.min(h, offscreen.height - crop.rect.y);
-    if (crop.aspectRatio) crop.rect.w = crop.rect.h * crop.aspectRatio;
-    if (cwEl) cwEl.value = Math.round(crop.rect.w);
-    crop.rect = clampCropRect(crop.rect); redraw();
-  });
+  const cwEl=document.getElementById('cropW'), chEl=document.getElementById('cropH');
+  if (cwEl) cwEl.addEventListener('change', e => { const w=parseInt(e.target.value); if (!w||w<1) return; crop.rect.w=Math.min(w,offscreen.width-crop.rect.x); if (crop.aspectRatio) crop.rect.h=crop.rect.w/crop.aspectRatio; if (chEl) chEl.value=Math.round(crop.rect.h); crop.rect=clampCropRect(crop.rect); redraw(); });
+  if (chEl) chEl.addEventListener('change', e => { const h=parseInt(e.target.value); if (!h||h<1) return; crop.rect.h=Math.min(h,offscreen.height-crop.rect.y); if (crop.aspectRatio) crop.rect.w=crop.rect.h*crop.aspectRatio; if (cwEl) cwEl.value=Math.round(crop.rect.w); crop.rect=clampCropRect(crop.rect); redraw(); });
 
-  const btnAC = document.getElementById('btnApplyCrop'), btnCC = document.getElementById('btnCancelCrop');
+  const btnAC=document.getElementById('btnApplyCrop'), btnCC=document.getElementById('btnCancelCrop');
   if (btnAC) btnAC.addEventListener('click', applyCrop);
   if (btnCC) btnCC.addEventListener('click', deactivateCrop);
 
-  const bCCW = document.getElementById('btnRotateCCW'), bCW = document.getElementById('btnRotateCW');
-  const bFH  = document.getElementById('btnFlipH'),     bFV = document.getElementById('btnFlipV');
-  if (bCCW) bCCW.addEventListener('click', () => rotateCanvas90(270));
-  if (bCW)  bCW.addEventListener('click',  () => rotateCanvas90(90));
-  if (bFH)  bFH.addEventListener('click',  () => flipCanvas(true));
-  if (bFV)  bFV.addEventListener('click',  () => flipCanvas(false));
+  const bCCW=document.getElementById('btnRotateCCW'), bCW=document.getElementById('btnRotateCW');
+  const bFH=document.getElementById('btnFlipH'), bFV=document.getElementById('btnFlipV');
+  if (bCCW) bCCW.addEventListener('click', ()=>rotateCanvas90(270));
+  if (bCW)  bCW.addEventListener('click',  ()=>rotateCanvas90(90));
+  if (bFH)  bFH.addEventListener('click',  ()=>flipCanvas(true));
+  if (bFV)  bFV.addEventListener('click',  ()=>flipCanvas(false));
 
-  rotSlider = document.getElementById('rotateSlider');
-  rotVal    = document.getElementById('rotateVal');
+  rotSlider=document.getElementById('rotateSlider'); rotVal=document.getElementById('rotateVal');
   if (rotSlider) {
-    rotSlider.addEventListener('input', () => {
-      const deg = parseFloat(rotSlider.value);
-      if (rotVal) rotVal.textContent = `${deg}°`;
-      updateSliderTrack(rotSlider);
-      applyFineRotation(deg);
-    });
+    rotSlider.addEventListener('input', () => { const deg=parseFloat(rotSlider.value); if (rotVal) rotVal.textContent=`${deg}°`; updateSliderTrack(rotSlider); applyFineRotation(deg); });
     rotSlider.addEventListener('change', pushHistory);
   }
 
-  const btnRT = document.getElementById('btnResetTransform');
-  if (btnRT) btnRT.addEventListener('click', () => {
-    state.params.rotation = 0;
-    if (rotSlider) { rotSlider.value = 0; updateSliderTrack(rotSlider); }
-    if (rotVal) rotVal.textContent = '0°';
-    redraw(); pushHistory(); showHint('Transform reset');
-  });
+  const btnRT=document.getElementById('btnResetTransform');
+  if (btnRT) btnRT.addEventListener('click', () => { state.params.rotation=0; if (rotSlider){rotSlider.value=0;updateSliderTrack(rotSlider);} if (rotVal) rotVal.textContent='0°'; redraw(); pushHistory(); showHint('Transform reset'); });
 }
 
 // ═══════════════════════════════════════════
@@ -1398,11 +1579,8 @@ function bindTools() {
 function bindAccordion() {
   document.querySelectorAll('.accordion-header').forEach(header => {
     header.addEventListener('click', () => {
-      const section = header.parentElement;
-      const body    = section.querySelector('.accordion-body');
-      const isOpen  = section.classList.contains('open');
-      section.classList.toggle('open', !isOpen);
-      body.style.display = isOpen ? 'none' : 'block';
+      const section=header.parentElement, body=section.querySelector('.accordion-body'), isOpen=section.classList.contains('open');
+      section.classList.toggle('open',!isOpen); body.style.display=isOpen?'none':'block';
     });
   });
 }
@@ -1411,67 +1589,47 @@ function bindAccordion() {
 //  TOPBAR
 // ═══════════════════════════════════════════
 function bindTopbar() {
-  const cx = () => canvas.width  / 2;
-  const cy = () => canvas.height / 2;
+  const cx=()=>canvas.width/2, cy=()=>canvas.height/2;
+  document.getElementById('btnZoomIn') .addEventListener('click',()=>zoomTo(state.zoom*1.25,cx(),cy()));
+  document.getElementById('btnZoomOut').addEventListener('click',()=>zoomTo(state.zoom*0.80,cx(),cy()));
+  document.getElementById('btnFit')    .addEventListener('click',fitToScreen);
+  document.getElementById('btnUndo')   .addEventListener('click',undo);
+  document.getElementById('btnRedo')   .addEventListener('click',redo);
 
-  document.getElementById('btnZoomIn') .addEventListener('click', () => zoomTo(state.zoom * 1.25, cx(), cy()));
-  document.getElementById('btnZoomOut').addEventListener('click', () => zoomTo(state.zoom * 0.80, cx(), cy()));
-  document.getElementById('btnFit')    .addEventListener('click', fitToScreen);
-  document.getElementById('btnUndo')   .addEventListener('click', undo);
-  document.getElementById('btnRedo')   .addEventListener('click', redo);
-
-  document.getElementById('btnReset').addEventListener('click', () => {
-    if (confirm('Reset to original image? This will clear all edits and crop/rotate.')) {
-      resetToOriginal();
-    }
+  document.getElementById('btnReset').addEventListener('click',()=>{
+    if (confirm('Reset to original image? This will clear all edits and crop/rotate.')) resetToOriginal();
   });
 
-  let showingBefore = false;
-  document.getElementById('btnBefore').addEventListener('click', () => {
-    showingBefore = !showingBefore;
-    const btn = document.getElementById('btnBefore');
+  let showingBefore=false;
+  document.getElementById('btnBefore').addEventListener('click',()=>{
+    showingBefore=!showingBefore;
+    const btn=document.getElementById('btnBefore');
     if (showingBefore) {
-      const area = canvasArea.getBoundingClientRect();
-      canvas.width = area.width; canvas.height = area.height;
-      drawCheckerboard();
-      ctx.save();
-      ctx.translate(state.offsetX, state.offsetY);
-      ctx.scale(state.zoom, state.zoom);
-      ctx.drawImage(state.originalImage, 0, 0);
-      ctx.restore();
-      btn.classList.add('active'); btn.textContent = '◨ After';
-    } else {
-      redraw(); btn.classList.remove('active'); btn.textContent = '◧ Before';
-    }
+      const area=canvasArea.getBoundingClientRect(); canvas.width=area.width; canvas.height=area.height;
+      drawCheckerboard(); ctx.save(); ctx.translate(state.offsetX,state.offsetY); ctx.scale(state.zoom,state.zoom);
+      ctx.drawImage(state.originalImage,0,0); ctx.restore();
+      btn.classList.add('active'); btn.textContent='◨ After';
+    } else { redraw(); btn.classList.remove('active'); btn.textContent='◧ Before'; }
   });
 
-  document.getElementById('btnExport').addEventListener('click', () => showHint('Export coming Day 16 ✦'));
+  document.getElementById('btnExport').addEventListener('click',()=>showHint('Export coming Day 16 ✦'));
 
-  const btnSave = document.getElementById('btnSaveState');
-  if (btnSave) btnSave.addEventListener('click', saveStateToFile);
+  const btnSave=document.getElementById('btnSaveState');
+  if (btnSave) btnSave.addEventListener('click',saveStateToFile);
 
-  const btnLoad    = document.getElementById('btnLoadState');
-  const stateInput = document.getElementById('stateFileInput');
+  const btnLoad=document.getElementById('btnLoadState'), stateInput=document.getElementById('stateFileInput');
   if (btnLoad && stateInput) {
-    btnLoad.addEventListener('click', () => stateInput.click());
-    stateInput.addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (file) { loadStateFromFile(file); stateInput.value = ''; }
-    });
+    btnLoad.addEventListener('click',()=>stateInput.click());
+    stateInput.addEventListener('change',e=>{ const file=e.target.files[0]; if (file){loadStateFromFile(file);stateInput.value='';} });
   }
 }
 
-// ── History panel controls ──
 function bindHistoryPanel() {
-  const btnClear = document.getElementById('btnClearHistory');
+  const btnClear=document.getElementById('btnClearHistory');
   if (btnClear) {
-    btnClear.addEventListener('click', () => {
-      const current      = state.history[state.historyIndex];
-      state.history      = [current];
-      state.historyIndex = 0;
-      updateHistoryBtns();
-      updateHistoryPanel();
-      showHint('History cleared');
+    btnClear.addEventListener('click',()=>{
+      const current=state.history[state.historyIndex]; state.history=[current]; state.historyIndex=0;
+      updateHistoryBtns(); updateHistoryPanel(); showHint('History cleared');
     });
   }
 }
@@ -1481,19 +1639,17 @@ function bindHistoryPanel() {
 // ═══════════════════════════════════════════
 function bindKeyboard() {
   document.addEventListener('keydown', e => {
-    if (e.target.tagName === 'INPUT') return;
-    const cx = canvas.width / 2, cy = canvas.height / 2;
-
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'y')                { e.preventDefault(); redo(); }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z' &&  e.shiftKey) { e.preventDefault(); redo(); }
-
-    switch (e.key) {
+    if (e.target.tagName==='INPUT') return;
+    const cx=canvas.width/2, cy=canvas.height/2;
+    if ((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey) { e.preventDefault(); undo(); }
+    if ((e.ctrlKey||e.metaKey)&&e.key==='y')               { e.preventDefault(); redo(); }
+    if ((e.ctrlKey||e.metaKey)&&e.key==='z'&&e.shiftKey)   { e.preventDefault(); redo(); }
+    switch(e.key) {
       case '0': fitToScreen(); break;
-      case '1': zoomTo(1, cx, cy); break;
-      case '2': zoomTo(2, cx, cy); break;
-      case '+': case '=': zoomTo(state.zoom * 1.25, cx, cy); break;
-      case '-': zoomTo(state.zoom * 0.80, cx, cy); break;
+      case '1': zoomTo(1,cx,cy); break;
+      case '2': zoomTo(2,cx,cy); break;
+      case '+': case '=': zoomTo(state.zoom*1.25,cx,cy); break;
+      case '-': zoomTo(state.zoom*0.80,cx,cy); break;
       case 'b': case 'B': document.getElementById('btnBefore').click(); break;
       case 'r': case 'R': document.getElementById('btnReset').click(); break;
       case 'c': case 'C': document.querySelector('[data-tool="crop"]')?.click(); break;
@@ -1509,53 +1665,31 @@ function bindKeyboard() {
 function bindWhiteBalance() {
   document.querySelectorAll('.wb-preset').forEach(btn => {
     btn.addEventListener('click', () => {
-      const temp = parseInt(btn.dataset.temp), tint = parseInt(btn.dataset.tint);
-      state.params.temperature = temp; state.params.tint = tint;
+      const temp=parseInt(btn.dataset.temp), tint=parseInt(btn.dataset.tint);
+      state.params.temperature=temp; state.params.tint=tint;
 
-      const ts = document.querySelector('.adj-slider[data-param="temperature"]');
-      const ti = document.querySelector('.adj-slider[data-param="tint"]');
+      const ts=document.querySelector('.adj-slider[data-param="temperature"]');
+      const ti=document.querySelector('.adj-slider[data-param="tint"]');
+      if (ts) { ts.value=temp; const v=ts.nextElementSibling; v.textContent=temp>0?`+${temp}`:`${temp}`; v.style.color=temp!==0?'var(--accent)':'var(--text-muted)'; ts.closest('.slider-row').classList.toggle('slider-row--active',temp!==0); updateSliderTrack(ts); }
+      if (ti) { ti.value=tint; const v=ti.nextElementSibling; v.textContent=tint>0?`+${tint}`:`${tint}`; v.style.color=tint!==0?'var(--accent)':'var(--text-muted)'; ti.closest('.slider-row').classList.toggle('slider-row--active',tint!==0); updateSliderTrack(ti); }
 
-      if (ts) {
-        ts.value = temp; const v = ts.nextElementSibling;
-        v.textContent = temp > 0 ? `+${temp}` : `${temp}`;
-        v.style.color = temp !== 0 ? 'var(--accent)' : 'var(--text-muted)';
-        ts.closest('.slider-row').classList.toggle('slider-row--active', temp !== 0);
-        updateSliderTrack(ts);
-      }
-      if (ti) {
-        ti.value = tint; const v = ti.nextElementSibling;
-        v.textContent = tint > 0 ? `+${tint}` : `${tint}`;
-        v.style.color = tint !== 0 ? 'var(--accent)' : 'var(--text-muted)';
-        ti.closest('.slider-row').classList.toggle('slider-row--active', tint !== 0);
-        updateSliderTrack(ti);
-      }
-
-      document.querySelectorAll('.wb-preset').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      scheduleRedraw(); drawHistogram(); pushHistory();
-      showHint(`White balance: ${btn.textContent}`);
+      document.querySelectorAll('.wb-preset').forEach(b=>b.classList.remove('active')); btn.classList.add('active');
+      scheduleRedraw(); drawHistogram(); pushHistory(); showHint(`White balance: ${btn.textContent}`);
     });
   });
 
-  const ts = document.querySelector('.adj-slider[data-param="temperature"]');
-  if (ts) {
-    ts.addEventListener('input', () => {
-      showHint(`${Math.round(sliderToKelvin(parseInt(ts.value))).toLocaleString()}K`);
-      document.querySelectorAll('.wb-preset').forEach(b => b.classList.remove('active'));
-    });
-  }
+  const ts=document.querySelector('.adj-slider[data-param="temperature"]');
+  if (ts) ts.addEventListener('input',()=>{ showHint(`${Math.round(sliderToKelvin(parseInt(ts.value))).toLocaleString()}K`); document.querySelectorAll('.wb-preset').forEach(b=>b.classList.remove('active')); });
 }
 
 // ═══════════════════════════════════════════
 //  HINT
 // ═══════════════════════════════════════════
 function showHint(msg) {
-  canvasHint.textContent   = msg;
-  canvasHint.style.opacity = '1';
-  clearTimeout(hintTimer);
-  hintTimer = setTimeout(() => { canvasHint.style.opacity = '0'; }, 2500);
+  canvasHint.textContent=msg; canvasHint.style.opacity='1';
+  clearTimeout(hintTimer); hintTimer=setTimeout(()=>{ canvasHint.style.opacity='0'; },2500);
 }
-canvasHint.style.transition = 'opacity 0.4s';
+canvasHint.style.transition='opacity 0.4s';
 
 // ═══════════════════════════════════════════
 //  START

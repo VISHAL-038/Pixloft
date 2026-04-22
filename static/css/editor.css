@@ -698,3 +698,65 @@ body:has(.editor-shell) main {
 
 /* ===== Save/Load State buttons ===== */
 .topbar-btn + .topbar-btn { margin-left: 0; }
+
+
+/* ===== Tone Curve ===== */
+.curve-channels {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.curve-ch {
+  flex: 1;
+  padding: 4px 0;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.curve-ch:hover { background: var(--bg-3); color: var(--text-primary); }
+.curve-ch.active {
+  background: color-mix(in srgb, var(--cc, #ffffff) 15%, transparent);
+  border-color: var(--cc, #ffffff);
+  color: var(--cc, #ffffff);
+}
+
+.curve-wrap {
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+  line-height: 0;
+}
+#curveCanvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: crosshair;
+}
+
+.curve-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.curve-reset-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.curve-reset-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
