@@ -97,6 +97,11 @@ let curveCtx           = null;
 let curveDragging      = null;
 let curveHover         = null;
 
+// ── Preset state ──
+let activePresetCategory = 'all';
+let customPresets        = [];
+const PRESETS_LS_KEY     = 'pixloft_presets';
+
 // ── LocalStorage key ──
 const LS_KEY = `pixloft_state_${typeof IMAGE_ID !== 'undefined' ? IMAGE_ID : 'default'}`;
 
@@ -116,6 +121,7 @@ function init() {
   bindWhiteBalance();
   initCurveCanvas();
   bindCurveChannels();
+  bindPresets(); 
 }
 
 // ═══════════════════════════════════════════
@@ -156,6 +162,8 @@ function loadImage(src) {
     }
 
     updateHistoryPanel();
+    // Render preset thumbnails now that image is loaded
+    renderPresetGrid();
 
     if (!largeImageWarningShown && img.naturalWidth * img.naturalHeight > 4000000) {
       console.warn('Pixloft: large image — sharpening/noise reduction may be slow');
@@ -1241,6 +1249,363 @@ const PARAM_LABELS = {
   noise_reduction:'Noise Reduction', noise_detail:'NR Detail', noise_contrast:'NR Contrast',
   vignette:'Vignette', grain:'Grain', rotation:'Rotation',
 };
+
+// ═══════════════════════════════════════════
+//  BUILT-IN PRESET LIBRARY
+// ═══════════════════════════════════════════
+const BUILTIN_PRESETS = [
+  {
+    name: 'Vivid',
+    category: 'builtin',
+    params: { brightness:5, contrast:20, saturation:30, vibrance:25, highlights:-10, shadows:10, exposure:5 },
+  },
+  {
+    name: 'Matte',
+    category: 'builtin',
+    params: { brightness:10, contrast:-20, saturation:-15, highlights:-30, shadows:25, exposure:0 },
+  },
+  {
+    name: 'Cinematic',
+    category: 'builtin',
+    params: { brightness:-5, contrast:30, saturation:-10, highlights:-20, shadows:-15, temperature:-15, tint:5, exposure:-10 },
+  },
+  {
+    name: 'Golden Hour',
+    category: 'builtin',
+    params: { brightness:8, contrast:10, saturation:20, temperature:40, tint:-5, highlights:-15, shadows:15, exposure:5 },
+  },
+  {
+    name: 'Cool Tone',
+    category: 'builtin',
+    params: { brightness:0, contrast:15, saturation:5, temperature:-35, tint:10, highlights:-10, shadows:5 },
+  },
+  {
+    name: 'B&W Classic',
+    category: 'builtin',
+    params: { saturation:-100, contrast:20, brightness:5, highlights:-15, shadows:10 },
+  },
+  {
+    name: 'B&W Dramatic',
+    category: 'builtin',
+    params: { saturation:-100, contrast:50, brightness:-10, highlights:-30, shadows:-20, exposure:-10 },
+  },
+  {
+    name: 'Faded Film',
+    category: 'builtin',
+    params: { brightness:15, contrast:-25, saturation:-20, highlights:-20, shadows:30, exposure:5 },
+    curve: {
+      luma: [[0,0.08],[0.25,0.3],[0.75,0.72],[1,0.92]],
+      r:[[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      g:[[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      b:[[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+    },
+  },
+  {
+    name: 'Warm Vintage',
+    category: 'builtin',
+    params: { brightness:5, contrast:-10, saturation:10, temperature:30, tint:10, highlights:-20, shadows:20 },
+    curve: {
+      luma: [[0,0.05],[0.25,0.28],[0.75,0.73],[1,0.95]],
+      r:[[0,0.05],[0.25,0.28],[0.75,0.78],[1,1]],
+      g:[[0,0],[0.25,0.25],[0.75,0.75],[1,1]],
+      b:[[0,0],[0.25,0.22],[0.75,0.68],[1,0.92]],
+    },
+  },
+  {
+    name: 'Velvia',
+    category: 'builtin',
+    params: { brightness:0, contrast:25, saturation:40, vibrance:30, highlights:-10, shadows:0, exposure:0 },
+  },
+  {
+    name: 'Soft Glow',
+    category: 'builtin',
+    params: { brightness:15, contrast:-15, saturation:5, highlights:20, shadows:10, exposure:5 },
+  },
+  {
+    name: 'Moody Dark',
+    category: 'builtin',
+    params: { brightness:-15, contrast:35, saturation:-5, highlights:-40, shadows:-20, exposure:-15, temperature:-10 },
+  },
+];
+
+// ═══════════════════════════════════════════
+//  PRESET ENGINE
+// ═══════════════════════════════════════════
+
+// Load custom presets from localStorage
+function loadCustomPresets() {
+  try {
+    const raw = localStorage.getItem(PRESETS_LS_KEY);
+    customPresets = raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    customPresets = [];
+  }
+}
+
+// Save custom presets to localStorage
+function saveCustomPresets() {
+  try {
+    localStorage.setItem(PRESETS_LS_KEY, JSON.stringify(customPresets));
+  } catch (e) { /* quota exceeded */ }
+}
+
+// Build a preset from current state
+function buildPreset(name) {
+  return {
+    name,
+    category: 'custom',
+    timestamp: Date.now(),
+    params: {
+      brightness:      state.params.brightness,
+      contrast:        state.params.contrast,
+      exposure:        state.params.exposure,
+      highlights:      state.params.highlights,
+      shadows:         state.params.shadows,
+      saturation:      state.params.saturation,
+      vibrance:        state.params.vibrance,
+      temperature:     state.params.temperature,
+      tint:            state.params.tint,
+      sharpness:       state.params.sharpness,
+      sharpen_radius:  state.params.sharpen_radius,
+      sharpen_detail:  state.params.sharpen_detail,
+      noise_reduction: state.params.noise_reduction,
+      noise_detail:    state.params.noise_detail,
+      noise_contrast:  state.params.noise_contrast,
+      vignette:        state.params.vignette,
+      grain:           state.params.grain,
+    },
+    hsl:   JSON.parse(JSON.stringify(state.params.hsl)),
+    curve: JSON.parse(JSON.stringify(state.params.curve)),
+  };
+}
+
+// Apply a preset to current state
+function applyPreset(preset) {
+  // Apply flat params
+  const safeParams = [
+    'brightness','contrast','exposure','highlights','shadows',
+    'saturation','vibrance','temperature','tint',
+    'sharpness','sharpen_radius','sharpen_detail',
+    'noise_reduction','noise_detail','noise_contrast',
+    'vignette','grain',
+  ];
+  safeParams.forEach(key => {
+    if (preset.params?.[key] !== undefined) {
+      state.params[key] = preset.params[key];
+    } else {
+      state.params[key] = 0; // reset to 0 if not in preset
+    }
+  });
+
+  // Apply HSL if present, otherwise reset
+  if (preset.hsl) {
+    state.params.hsl = JSON.parse(JSON.stringify(preset.hsl));
+  } else {
+    Object.keys(state.params.hsl).forEach(band => {
+      state.params.hsl[band] = { hue: 0, sat: 0, lum: 0 };
+    });
+  }
+
+  // Apply curve if present, otherwise reset
+  if (preset.curve) {
+    state.params.curve = JSON.parse(JSON.stringify(preset.curve));
+  } else {
+    Object.keys(state.params.curve).forEach(ch => {
+      state.params.curve[ch] = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]];
+    });
+  }
+
+  syncSliders();
+  updateHslDots();
+  if (curveCanvas) drawCurveCanvas();
+  redraw();
+  drawHistogram();
+  pushHistory();
+  showHint(`Preset applied: ${preset.name}`);
+}
+
+// Generate a tiny thumbnail of current image with preset applied
+function generateThumbnail(preset, size = 60) {
+  if (!state.imageLoaded) return null;
+
+  // Save current params
+  const savedParams = JSON.parse(JSON.stringify(state.params));
+
+  // Temporarily apply preset params
+  const safeParams = [
+    'brightness','contrast','exposure','highlights','shadows',
+    'saturation','vibrance','temperature','tint',
+    'sharpness','sharpen_radius','sharpen_detail',
+    'noise_reduction','noise_detail','noise_contrast',
+    'vignette','grain',
+  ];
+  safeParams.forEach(key => {
+    state.params[key] = preset.params?.[key] ?? 0;
+  });
+  if (preset.hsl) state.params.hsl = JSON.parse(JSON.stringify(preset.hsl));
+  if (preset.curve) state.params.curve = JSON.parse(JSON.stringify(preset.curve));
+
+  // Process pixels at thumbnail resolution
+  const scale     = Math.min(size / offscreen.width, size / offscreen.height);
+  const tw        = Math.round(offscreen.width  * scale);
+  const th        = Math.round(offscreen.height * scale);
+
+  const tmp       = document.createElement('canvas');
+  tmp.width       = tw; tmp.height = th;
+  const tmpCtx    = tmp.getContext('2d');
+  tmpCtx.drawImage(offscreen, 0, 0, tw, th);
+
+  const srcData   = tmpCtx.getImageData(0, 0, tw, th);
+  const processed = processPixels(srcData);
+  tmpCtx.putImageData(processed, 0, 0);
+
+  const dataUrl = tmp.toDataURL('image/jpeg', 0.7);
+
+  // Restore params
+  state.params.brightness      = savedParams.brightness;
+  state.params.contrast        = savedParams.contrast;
+  state.params.exposure        = savedParams.exposure;
+  state.params.highlights      = savedParams.highlights;
+  state.params.shadows         = savedParams.shadows;
+  state.params.saturation      = savedParams.saturation;
+  state.params.vibrance        = savedParams.vibrance;
+  state.params.temperature     = savedParams.temperature;
+  state.params.tint            = savedParams.tint;
+  state.params.sharpness       = savedParams.sharpness;
+  state.params.sharpen_radius  = savedParams.sharpen_radius;
+  state.params.sharpen_detail  = savedParams.sharpen_detail;
+  state.params.noise_reduction = savedParams.noise_reduction;
+  state.params.noise_detail    = savedParams.noise_detail;
+  state.params.noise_contrast  = savedParams.noise_contrast;
+  state.params.vignette        = savedParams.vignette;
+  state.params.grain           = savedParams.grain;
+  state.params.hsl   = JSON.parse(JSON.stringify(savedParams.hsl));
+  state.params.curve = JSON.parse(JSON.stringify(savedParams.curve));
+
+  return dataUrl;
+}
+
+// Render the preset grid
+function renderPresetGrid() {
+  const grid = document.getElementById('presetGrid');
+  if (!grid) return;
+  grid.innerHTML = '';
+
+  const allPresets = [
+    ...BUILTIN_PRESETS,
+    ...customPresets,
+  ];
+
+  const filtered = activePresetCategory === 'all'    ? allPresets
+                 : activePresetCategory === 'builtin' ? BUILTIN_PRESETS
+                 : customPresets;
+
+  if (filtered.length === 0) {
+    grid.innerHTML = '<div class="preset-empty">No presets yet — save your current edits above</div>';
+    return;
+  }
+
+  filtered.forEach((preset, index) => {
+    const card = document.createElement('div');
+    card.className = 'preset-card';
+    card.title     = preset.name;
+
+    // Generate thumbnail
+    const thumb = generateThumbnail(preset, 80);
+
+    card.innerHTML = `
+      <div class="preset-thumb">
+        ${thumb
+          ? `<img src="${thumb}" alt="${preset.name}" loading="lazy">`
+          : `<div class="preset-thumb-placeholder">◈</div>`
+        }
+        ${preset.category === 'custom'
+          ? `<button class="preset-delete" data-index="${index}" title="Delete preset">✕</button>`
+          : ''
+        }
+      </div>
+      <div class="preset-name">${preset.name}</div>
+    `;
+
+    // Apply on click
+    card.addEventListener('click', e => {
+      if (e.target.classList.contains('preset-delete')) return;
+      document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('preset-card--active'));
+      card.classList.add('preset-card--active');
+      applyPreset(preset);
+    });
+
+    // Delete custom preset
+    const delBtn = card.querySelector('.preset-delete');
+    if (delBtn) {
+      delBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const customIndex = customPresets.findIndex(p => p.name === preset.name && p.timestamp === preset.timestamp);
+        if (customIndex >= 0) {
+          customPresets.splice(customIndex, 1);
+          saveCustomPresets();
+          renderPresetGrid();
+          showHint(`Deleted preset: ${preset.name}`);
+        }
+      });
+    }
+
+    grid.appendChild(card);
+  });
+}
+
+// Bind preset UI
+function bindPresets() {
+  loadCustomPresets();
+
+  // Category tabs
+  document.querySelectorAll('.preset-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.preset-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      activePresetCategory = tab.dataset.cat;
+      renderPresetGrid();
+    });
+  });
+
+  // Save preset button
+  const btnSave  = document.getElementById('btnSavePreset');
+  const nameInput = document.getElementById('presetNameInput');
+
+  if (btnSave && nameInput) {
+    btnSave.addEventListener('click', () => {
+      const name = nameInput.value.trim();
+      if (!name) { showHint('Enter a preset name first'); nameInput.focus(); return; }
+
+      // Check for duplicate names
+      if (customPresets.some(p => p.name === name)) {
+        if (!confirm(`Replace existing preset "${name}"?`)) return;
+        customPresets = customPresets.filter(p => p.name !== name);
+      }
+
+      const preset = buildPreset(name);
+      customPresets.unshift(preset); // newest first
+      saveCustomPresets();
+      nameInput.value = '';
+
+      // Switch to custom tab to show it
+      document.querySelectorAll('.preset-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('.preset-tab[data-cat="custom"]')?.classList.add('active');
+      activePresetCategory = 'custom';
+
+      renderPresetGrid();
+      showHint(`Preset saved: ${name}`);
+    });
+
+    // Save on Enter key
+    nameInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') btnSave.click();
+    });
+  }
+
+  // Initial render
+  renderPresetGrid();
+}
 
 function describeChange(prev, curr) {
   if (!prev) return 'Original';

@@ -166,6 +166,34 @@
       <!-- Accordion sections -->
       <div class="accordion" id="accordion">
 
+        <!-- Presets -->
+<div class="accordion-section open">
+  <button class="accordion-header">
+    <span>★ Presets</span>
+    <span class="accordion-arrow">▾</span>
+  </button>
+  <div class="accordion-body" style="padding:10px 14px;">
+
+    <!-- Save current as preset -->
+    <div class="preset-save-row">
+      <input type="text" id="presetNameInput" class="preset-name-input"
+             placeholder="Preset name..." maxlength="30">
+      <button class="btn btn--primary" id="btnSavePreset" style="flex-shrink:0;">Save</button>
+    </div>
+
+    <!-- Category tabs -->
+    <div class="preset-tabs">
+      <button class="preset-tab active" data-cat="all">All</button>
+      <button class="preset-tab" data-cat="builtin">Built-in</button>
+      <button class="preset-tab" data-cat="custom">My Presets</button>
+    </div>
+
+    <!-- Preset grid -->
+    <div class="preset-grid" id="presetGrid"></div>
+
+  </div>
+</div>
+
         <!-- Light -->
         <div class="accordion-section open">
           <button class="accordion-header">
