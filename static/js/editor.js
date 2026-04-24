@@ -122,6 +122,7 @@ function init() {
   initCurveCanvas();
   bindCurveChannels();
   bindPresets(); 
+  bindExportModal();
 }
 
 // ═══════════════════════════════════════════
@@ -1074,7 +1075,11 @@ function _drawHistogram() {
 // ═══════════════════════════════════════════
 function bindSliders() {
   document.querySelectorAll('.adj-slider:not(.hsl-slider)').forEach(slider => {
-    const valEl = slider.nextElementSibling, row = slider.closest('.slider-row');
+    const valEl = slider.nextElementSibling;
+    const row   = slider.closest('.slider-row');
+
+    // Guard — skip sliders not inside a .slider-row
+    if (!row || !valEl) return;
 
     slider.addEventListener('input', () => {
       const param = slider.dataset.param; if (!param) return;
@@ -1084,6 +1089,7 @@ function bindSliders() {
       row.classList.toggle('slider-row--active', value !== 0);
       updateSliderTrack(slider); scheduleRedraw(); drawHistogram();
     });
+
     slider.addEventListener('change', pushHistory);
 
     const label = row.querySelector('label');
@@ -1977,7 +1983,7 @@ function bindTopbar() {
     } else { redraw(); btn.classList.remove('active'); btn.textContent='◧ Before'; }
   });
 
-  document.getElementById('btnExport').addEventListener('click',()=>showHint('Export coming Day 16 ✦'));
+  document.getElementById('btnExport').addEventListener('click', openExportModal);
 
   const btnSave=document.getElementById('btnSaveState');
   if (btnSave) btnSave.addEventListener('click',saveStateToFile);
@@ -1987,6 +1993,167 @@ function bindTopbar() {
     btnLoad.addEventListener('click',()=>stateInput.click());
     stateInput.addEventListener('change',e=>{ const file=e.target.files[0]; if (file){loadStateFromFile(file);stateInput.value='';} });
   }
+}
+
+// ═══════════════════════════════════════════
+//  EXPORT MODAL
+// ═══════════════════════════════════════════
+let exportFormat  = 'jpeg';
+let exportQuality = 95;
+
+function openExportModal() {
+  if (!state.imageLoaded) return;
+
+  const overlay = document.getElementById('exportOverlay');
+  if (!overlay) return;
+
+  // Update size info
+  const sizeEl = document.getElementById('exportSizeInfo');
+  if (sizeEl) {
+    sizeEl.textContent = `${offscreen.width} × ${offscreen.height}px`;
+  }
+
+  overlay.style.display = 'flex';
+}
+
+function closeExportModal() {
+  const overlay = document.getElementById('exportOverlay');
+  if (overlay) overlay.style.display = 'none';
+
+  // Reset progress
+  const prog  = document.getElementById('exportProgress');
+  const bar   = document.getElementById('exportProgressBar');
+  const label = document.getElementById('exportProgressLabel');
+  if (prog)  prog.style.display  = 'none';
+  if (bar)   bar.style.width     = '0%';
+  if (label) label.textContent   = 'Processing on server...';
+}
+
+function bindExportModal() {
+  // Format buttons
+  document.querySelectorAll('.export-opt').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.export-opt').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      exportFormat = btn.dataset.fmt;
+
+      // Hide quality slider for PNG (lossless)
+      const qualRow = document.getElementById('qualityRow');
+      if (qualRow) qualRow.style.display = exportFormat === 'png' ? 'none' : 'flex';
+    });
+  });
+
+  // Quality slider
+  const qualSlider = document.getElementById('exportQuality');
+  const qualVal    = document.getElementById('exportQualityVal');
+  if (qualSlider && qualVal) {
+    qualSlider.addEventListener('input', () => {
+      exportQuality      = parseInt(qualSlider.value);
+      qualVal.textContent = `${exportQuality}%`;
+    });
+  }
+
+  // Cancel
+  const btnCancel = document.getElementById('btnExportCancel');
+  if (btnCancel) btnCancel.addEventListener('click', closeExportModal);
+
+  // Close on overlay click
+  const overlay = document.getElementById('exportOverlay');
+  if (overlay) {
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) closeExportModal();
+    });
+  }
+
+  // Confirm download
+  const btnConfirm = document.getElementById('btnExportConfirm');
+  if (btnConfirm) {
+    btnConfirm.addEventListener('click', async () => {
+      const prog  = document.getElementById('exportProgress');
+      const bar   = document.getElementById('exportProgressBar');
+      const label = document.getElementById('exportProgressLabel');
+
+      // Show progress
+      if (prog) prog.style.display = 'block';
+      btnConfirm.disabled          = true;
+
+      // Animate progress bar
+      let pct = 0;
+      const interval = setInterval(() => {
+        pct = Math.min(pct + 5, 85);
+        if (bar) bar.style.width = `${pct}%`;
+      }, 150);
+
+      try {
+        // Build export payload — send current params + curve + hsl
+        const payload = {
+          format:  exportFormat,
+          quality: exportQuality,
+          params: {
+            ...state.params,
+            hsl:   JSON.parse(JSON.stringify(state.params.hsl)),
+            curve: JSON.parse(JSON.stringify(state.params.curve)),
+          },
+        };
+
+        const res = await fetch(`/editor/api/export/${IMAGE_ID}/`, {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken':  getCsrfToken(),
+          },
+          body: JSON.stringify(payload),
+        });
+
+        clearInterval(interval);
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Export failed' }));
+          showHint(`⚠ ${err.error || 'Export failed'}`);
+          if (label) label.textContent = '⚠ Export failed';
+          btnConfirm.disabled          = false;
+          return;
+        }
+
+        // Complete bar
+        if (bar) bar.style.width = '100%';
+        if (label) label.textContent = 'Done! Downloading...';
+
+        // Trigger download
+        const blob     = await res.blob();
+        const url      = URL.createObjectURL(blob);
+        const a        = document.createElement('a');
+        const filename = res.headers.get('Content-Disposition')
+          ?.match(/filename="(.+)"/)?.[1]
+          || `export.${exportFormat === 'jpeg' ? 'jpg' : exportFormat}`;
+
+        a.href     = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        setTimeout(() => {
+          closeExportModal();
+          btnConfirm.disabled = false;
+          showHint(`Downloaded: ${filename}`);
+        }, 800);
+
+      } catch (err) {
+        clearInterval(interval);
+        console.error('Export error:', err);
+        showHint('⚠ Network error during export');
+        if (label) label.textContent = '⚠ Network error';
+        btnConfirm.disabled          = false;
+      }
+    });
+  }
+}
+
+// Helper — get CSRF token from cookie
+function getCsrfToken() {
+  return document.cookie.split('; ')
+    .find(r => r.startsWith('csrftoken='))
+    ?.split('=')[1] ?? '';
 }
 
 function bindHistoryPanel() {
