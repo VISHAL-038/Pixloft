@@ -1,0 +1,155 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}{{ album.name }} — {{ project.name }} — Pixloft{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <h1>{{ album.name }}</h1>
+    <button class="icon-btn"
+            onclick="renameAlbum({{ album.pk }}, '{{ album.name }}')"
+            title="Rename">✎</button>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    <a href="{% url 'projects:detail' project.pk %}" class="btn btn--ghost">
+      ← {{ project.name }}
+    </a>
+    <button class="btn btn--danger"
+            onclick="deleteAlbum({{ album.pk }})">Delete Album</button>
+  </div>
+</div>
+
+<!-- Bulk toolbar -->
+<div class="bulk-toolbar" id="bulkToolbar" style="display:none;">
+  <span id="bulkCount">0 selected</span>
+  <div style="display:flex;gap:8px;">
+    <select id="bulkMoveTarget" class="bulk-select">
+      <option value="root">Move to project root</option>
+      {% for a in albums %}
+      {% if a.pk != album.pk %}
+      <option value="{{ a.pk }}">{{ a.name }}</option>
+      {% endif %}
+      {% endfor %}
+    </select>
+    <button class="btn btn--ghost" id="btnBulkMove">Move</button>
+    <button class="btn btn--danger" id="btnBulkDelete">Delete</button>
+    <button class="btn btn--ghost" id="btnBulkCancel">Cancel</button>
+  </div>
+</div>
+
+<div class="section-header">
+  <span class="section-label">{{ album.image_count }} image{{ album.image_count|pluralize }}</span>
+  <label class="select-all-label">
+    <input type="checkbox" id="selectAll"> Select all
+  </label>
+</div>
+
+<div class="image-grid" id="imageGrid">
+  {% for image in images %}
+  <div class="image-card" id="img-{{ image.pk }}" data-image-id="{{ image.pk }}">
+    <div class="image-card__select">
+      <input type="checkbox" class="image-checkbox"
+             data-image-id="{{ image.pk }}" onchange="handleCheckboxChange()">
+    </div>
+    <a href="/editor/{{ image.pk }}/" class="image-card__thumb">
+      <img src="{{ image.file.url }}" alt="{{ image.original_name }}" loading="lazy">
+      <div class="image-card__overlay">
+        <span class="image-card__edit">Edit ✏</span>
+      </div>
+    </a>
+    <div class="image-card__info">
+      <div class="image-card__name">{{ image.original_name }}</div>
+      <div class="image-card__meta">
+        {% if image.resolution %}{{ image.resolution }} · {% endif %}
+        {{ image.file_size_display }}
+      </div>
+    </div>
+  </div>
+  {% empty %}
+  <div class="empty-state">
+    <div class="empty-icon">◈</div>
+    <p>No images in this album yet</p>
+    <a href="{% url 'projects:detail' project.pk %}" class="btn btn--primary">
+      Go to project to add images
+    </a>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const PROJECT_ID = {{ project.pk }};
+const ALBUM_ID   = {{ album.pk }};
+const CSRF_TOKEN = "{{ csrf_token }}";
+
+function handleCheckboxChange() {
+  const checked = document.querySelectorAll('.image-checkbox:checked');
+  const toolbar = document.getElementById('bulkToolbar');
+  document.getElementById('bulkCount').textContent = `${checked.length} selected`;
+  toolbar.style.display = checked.length > 0 ? 'flex' : 'none';
+}
+
+document.getElementById('selectAll').addEventListener('change', function() {
+  document.querySelectorAll('.image-checkbox').forEach(cb => cb.checked = this.checked);
+  handleCheckboxChange();
+});
+
+document.getElementById('btnBulkCancel').addEventListener('click', () => {
+  document.querySelectorAll('.image-checkbox').forEach(cb => cb.checked = false);
+  document.getElementById('selectAll').checked = false;
+  document.getElementById('bulkToolbar').style.display = 'none';
+});
+
+document.getElementById('btnBulkMove').addEventListener('click', async () => {
+  const imageIds = Array.from(document.querySelectorAll('.image-checkbox:checked'))
+    .map(cb => parseInt(cb.dataset.imageId));
+  const albumId = document.getElementById('bulkMoveTarget').value;
+  if (!imageIds.length) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/bulk-move/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({
+      image_ids: imageIds,
+      album_id: albumId === 'root' ? null : parseInt(albumId),
+    }),
+  });
+  if (res.ok) location.reload();
+});
+
+document.getElementById('btnBulkDelete').addEventListener('click', async () => {
+  const imageIds = Array.from(document.querySelectorAll('.image-checkbox:checked'))
+    .map(cb => parseInt(cb.dataset.imageId));
+  if (!imageIds.length || !confirm(`Delete ${imageIds.length} image(s)?`)) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/bulk-delete/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ image_ids: imageIds }),
+  });
+  if (res.ok) imageIds.forEach(id => document.getElementById(`img-${id}`)?.remove());
+  document.getElementById('bulkToolbar').style.display = 'none';
+});
+
+async function renameAlbum(albumId, currentName) {
+  const name = prompt('Rename album:', currentName);
+  if (!name || name === currentName) return;
+  const res = await fetch(`/projects/${PROJECT_ID}/albums/${albumId}/rename/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ name }),
+  });
+  if (res.ok) location.reload();
+}
+
+async function deleteAlbum(albumId) {
+  if (!confirm('Delete album? Images will be moved back to the project.')) return;
+  const res = await fetch(`/projects/${PROJECT_ID}/albums/${albumId}/delete/`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': CSRF_TOKEN },
+  });
+  if (res.ok) window.location.href = `/projects/${PROJECT_ID}/`;
+}
+</script>
+{% endblock %}

@@ -354,3 +354,174 @@
 .image-card__delete:hover { background: var(--danger); }
 
 
+/* ===== Albums ===== */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.section-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 32px;
+}
+.album-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color 0.15s;
+  position: relative;
+}
+.album-card:hover { border-color: var(--accent); }
+.album-card--dragover {
+  border-color: var(--accent);
+  background: rgba(124,111,255,0.08);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.album-card__cover {
+  display: block;
+  aspect-ratio: 4/3;
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.album-card__cover img {
+  width: 100%; height: 100%; object-fit: cover;
+  transition: transform 0.3s;
+}
+.album-card:hover .album-card__cover img { transform: scale(1.05); }
+.album-card__empty-cover {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 32px; color: var(--text-muted); opacity: 0.3;
+}
+.album-card__info { padding: 8px 10px 4px; }
+.album-card__name {
+  font-size: 13px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.album-card__meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+.album-card__actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px 8px;
+}
+.album-action-btn {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.album-action-btn:hover { background: var(--bg-3); color: var(--text-primary); }
+.album-action-btn--danger:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+
+/* ===== Bulk toolbar ===== */
+.bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.bulk-select {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+}
+
+/* ===== Image card checkbox ===== */
+.image-card__select {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.image-card:hover .image-card__select,
+.image-card__select:has(:checked) { opacity: 1; }
+.image-card__select input {
+  width: 16px; height: 16px; cursor: pointer;
+  accent-color: var(--accent);
+}
+.image-card--dragging { opacity: 0.4; }
+
+/* ===== Icon button ===== */
+.icon-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ===== Project title ===== */
+.project-title { font-size: 22px; font-weight: 600; }
+
+/* ===== Album / New modal ===== */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.modal-box {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px; width: 320px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.modal-title { font-size: 16px; font-weight: 500; }
+.modal-input {
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 14px;
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-actions { display: flex; gap: 10px; }
+.modal-actions .btn { flex: 1; justify-content: center; }

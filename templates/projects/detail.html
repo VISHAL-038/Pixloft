@@ -4,33 +4,117 @@
 
 {% block content %}
 <div class="page-header">
-  <h1>{{ project.name }}</h1>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <h1 class="project-title" id="projectTitle">{{ project.name }}</h1>
+    <button class="icon-btn" id="btnRenameProject" title="Rename project">✎</button>
+  </div>
   <div style="display:flex;gap:10px;">
+    <button class="btn btn--ghost" id="btnNewAlbum">+ Album</button>
     <a href="{% url 'projects:list' %}" class="btn btn--ghost">← Projects</a>
-    <a href="{% url 'projects:delete' project.pk %}" class="btn btn--danger">Delete</a>
+    <form method="post" action="{% url 'projects:delete' project.pk %}" style="display:inline;">
+      {% csrf_token %}
+      <button type="submit" class="btn btn--danger"
+              onclick="return confirm('Delete this project?')">Delete</button>
+    </form>
   </div>
 </div>
 
-<!-- Upload area -->
+<!-- Bulk action toolbar — hidden until images selected -->
+<div class="bulk-toolbar" id="bulkToolbar" style="display:none;">
+  <span id="bulkCount">0 selected</span>
+  <div style="display:flex;gap:8px;">
+    <select id="bulkMoveTarget" class="bulk-select">
+      <option value="">Move to...</option>
+      <option value="root">Project root</option>
+      {% for album in albums %}
+      <option value="{{ album.pk }}">{{ album.name }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn btn--ghost" id="btnBulkMove">Move</button>
+    <button class="btn btn--danger" id="btnBulkDelete">Delete</button>
+    <button class="btn btn--ghost" id="btnBulkCancel">Cancel</button>
+  </div>
+</div>
+
+<!-- Upload zone -->
 <div class="upload-zone" id="uploadZone">
-  <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp,image/tiff" multiple hidden>
-  <div class="upload-zone__inner" id="uploadInner">
+  <div class="upload-zone__inner">
     <div class="upload-icon">⬆</div>
-    <p class="upload-title">Drop images here or <span class="upload-link">browse</span></p>
-    <p class="upload-hint">JPEG, PNG, WEBP, TIFF · Max 20MB each</p>
+    <p class="upload-title">Drop images here or</p>
+    <label for="fileInput" class="btn btn--primary" style="margin-top:10px;cursor:pointer;">
+      Browse files
+    </label>
+    <input type="file" id="fileInput"
+           accept="image/jpeg,image/png,image/webp,image/tiff"
+           multiple style="display:none;">
+    <p class="upload-hint" style="margin-top:10px;">JPEG, PNG, WEBP, TIFF · Max 20MB</p>
   </div>
   <div class="upload-progress" id="uploadProgress" style="display:none;">
     <div class="upload-progress__bar" id="progressBar"></div>
   </div>
 </div>
-
-<!-- Upload errors -->
 <div id="uploadErrors"></div>
 
-<!-- Image grid -->
+<!-- Albums section -->
+{% if albums %}
+<div class="section-header">
+  <span class="section-label">Albums</span>
+</div>
+<div class="album-grid" id="albumGrid">
+  {% for album in albums %}
+  <div class="album-card" id="album-{{ album.pk }}"
+       data-album-id="{{ album.pk }}"
+       ondragover="event.preventDefault();this.classList.add('album-card--dragover')"
+       ondragleave="this.classList.remove('album-card--dragover')"
+       ondrop="handleAlbumDrop(event, {{ album.pk }})">
+    <a href="{% url 'projects:album_detail' project.pk album.pk %}"
+       class="album-card__cover">
+      {% if album.cover_image %}
+      <img src="{{ album.cover_image.file.url }}" alt="{{ album.name }}">
+      {% else %}
+      <div class="album-card__empty-cover">◈</div>
+      {% endif %}
+    </a>
+    <div class="album-card__info">
+      <div class="album-card__name" id="albumName-{{ album.pk }}">{{ album.name }}</div>
+      <div class="album-card__meta">{{ album.image_count }} image{{ album.image_count|pluralize }}</div>
+    </div>
+    <div class="album-card__actions">
+      <button class="album-action-btn"
+              onclick="renameAlbum({{ album.pk }}, '{{ album.name }}')"
+              title="Rename">✎</button>
+      <button class="album-action-btn album-action-btn--danger"
+              onclick="deleteAlbum({{ album.pk }})"
+              title="Delete album">✕</button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Images section -->
+<div class="section-header" style="margin-top:24px;">
+  <span class="section-label">
+    Images{% if albums %} (not in album){% endif %}
+  </span>
+  <label class="select-all-label">
+    <input type="checkbox" id="selectAll"> Select all
+  </label>
+</div>
+
 <div class="image-grid" id="imageGrid">
   {% for image in images %}
-  <div class="image-card" id="img-{{ image.pk }}">
+  <div class="image-card" id="img-{{ image.pk }}"
+       data-image-id="{{ image.pk }}"
+       draggable="true"
+       ondragstart="handleImageDragStart(event, {{ image.pk }})">
+
+    <div class="image-card__select">
+      <input type="checkbox" class="image-checkbox"
+             data-image-id="{{ image.pk }}"
+             onchange="handleCheckboxChange()">
+    </div>
+
     <a href="/editor/{{ image.pk }}/" class="image-card__thumb">
       <img src="{{ image.file.url }}" alt="{{ image.original_name }}" loading="lazy">
       <div class="image-card__overlay">
@@ -38,147 +122,309 @@
       </div>
     </a>
     <div class="image-card__info">
-      <div class="image-card__name" title="{{ image.original_name }}">{{ image.original_name }}</div>
+      <div class="image-card__name" title="{{ image.original_name }}">
+        {{ image.original_name }}
+      </div>
       <div class="image-card__meta">
         {% if image.resolution %}{{ image.resolution }} · {% endif %}
         {{ image.file_size_display }}
       </div>
     </div>
-    <form method="post" action="{% url 'editor:delete' image.pk %}" class="image-card__delete-form">
+    <form method="post" action="{% url 'editor:delete' image.pk %}"
+          class="image-card__delete-form">
       {% csrf_token %}
-      <button type="submit" class="image-card__delete" title="Delete image"
-        onclick="return confirm('Delete this image?')">✕</button>
+      <button type="submit" class="image-card__delete"
+              onclick="return confirm('Delete this image?')" title="Delete">✕</button>
     </form>
   </div>
   {% empty %}
   <div class="empty-state" id="emptyState">
     <div class="empty-icon">🖼</div>
-    <p>No images yet — upload some above</p>
+    <p>No images yet — upload above</p>
   </div>
   {% endfor %}
+</div>
+
+<!-- New Album Modal -->
+<div class="modal-overlay" id="albumModal" style="display:none;">
+  <div class="modal-box">
+    <div class="modal-title">New Album</div>
+    <input type="text" id="albumNameInput" class="modal-input"
+           placeholder="Album name..." maxlength="100" autofocus>
+    <div class="modal-actions">
+      <button class="btn btn--ghost" onclick="closeAlbumModal()">Cancel</button>
+      <button class="btn btn--primary" onclick="createAlbum()">Create</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-const PROJECT_ID = "{{ project.pk }}";
-const UPLOAD_URL = "{% url 'editor:upload' %}";
-const CSRF_TOKEN = "{{ csrf_token }}";
+const PROJECT_ID  = {{ project.pk }};
+const UPLOAD_URL  = "{% url 'editor:upload' %}";
+const CSRF_TOKEN  = "{{ csrf_token }}";
 
+// ── Upload ──
 const uploadZone  = document.getElementById('uploadZone');
 const fileInput   = document.getElementById('fileInput');
-const uploadInner = document.getElementById('uploadInner');
 const uploadProg  = document.getElementById('uploadProgress');
 const progressBar = document.getElementById('progressBar');
 const imageGrid   = document.getElementById('imageGrid');
 const errorsDiv   = document.getElementById('uploadErrors');
 
-// Click to browse
-uploadZone.addEventListener('click', (e) => {
-  if (e.target === uploadZone || uploadZone.contains(e.target)) {
-    fileInput.click();
-  }
-});
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
-// Drag and drop
 uploadZone.addEventListener('dragover', e => {
-  e.preventDefault();
-  uploadZone.classList.add('upload-zone--active');
+  e.preventDefault(); uploadZone.classList.add('upload-zone--active');
 });
 uploadZone.addEventListener('dragleave', () => {
   uploadZone.classList.remove('upload-zone--active');
 });
 uploadZone.addEventListener('drop', e => {
-  e.preventDefault();
-  uploadZone.classList.remove('upload-zone--active');
+  e.preventDefault(); uploadZone.classList.remove('upload-zone--active');
   handleFiles(e.dataTransfer.files);
 });
 
 async function handleFiles(files) {
   errorsDiv.innerHTML = '';
-  const fileArr = Array.from(files);
-
-  for (const file of fileArr) {
-    await uploadFile(file);
-  }
+  for (const file of Array.from(files)) await uploadFile(file);
 }
 
 async function uploadFile(file) {
-  // Show progress bar
   uploadProg.style.display = 'block';
-  progressBar.style.width = '0%';
-
+  progressBar.style.width  = '0%';
   const formData = new FormData();
   formData.append('image', file);
   formData.append('project_id', PROJECT_ID);
-
   try {
-    // Animate progress bar (fake progress while uploading)
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress = Math.min(progress + 10, 85);
-      progressBar.style.width = progress + '%';
+    let pct = 0;
+    const iv = setInterval(() => {
+      pct = Math.min(pct + 10, 85);
+      progressBar.style.width = pct + '%';
     }, 150);
-
-    const res = await fetch(UPLOAD_URL, {
-      method: 'POST',
-      headers: { 'X-CSRFToken': CSRF_TOKEN },
-      body: formData,
+    const res  = await fetch(UPLOAD_URL, {
+      method: 'POST', headers: { 'X-CSRFToken': CSRF_TOKEN }, body: formData,
     });
-
-    clearInterval(interval);
+    clearInterval(iv);
     const data = await res.json();
-
-    if (!res.ok) {
-      showError(data.error || 'Upload failed');
-      uploadProg.style.display = 'none';
-      return;
-    }
-
-    // Complete progress
+    if (!res.ok) { showError(data.error || 'Upload failed'); uploadProg.style.display='none'; return; }
     progressBar.style.width = '100%';
     setTimeout(() => { uploadProg.style.display = 'none'; }, 600);
-
-    // Add image card to grid without page reload
     addImageCard(data);
-
-  } catch (err) {
-    showError('Network error — please try again');
-    uploadProg.style.display = 'none';
-  }
+  } catch { showError('Network error'); uploadProg.style.display='none'; }
 }
 
 function addImageCard(data) {
-  // Remove empty state if present
-  const empty = document.getElementById('emptyState');
-  if (empty) empty.remove();
-
+  document.getElementById('emptyState')?.remove();
   const card = document.createElement('div');
-  card.className = 'image-card';
-  card.id = `img-${data.id}`;
+  card.className      = 'image-card';
+  card.id             = `img-${data.id}`;
+  card.dataset.imageId = data.id;
+  card.draggable      = true;
+  card.ondragstart    = (e) => handleImageDragStart(e, data.id);
   card.innerHTML = `
+    <div class="image-card__select">
+      <input type="checkbox" class="image-checkbox" data-image-id="${data.id}"
+             onchange="handleCheckboxChange()">
+    </div>
     <a href="${data.editor_url}" class="image-card__thumb">
       <img src="${data.url}" alt="${data.name}" loading="lazy">
-      <div class="image-card__overlay">
-        <span class="image-card__edit">Edit ✏</span>
-      </div>
+      <div class="image-card__overlay"><span class="image-card__edit">Edit ✏</span></div>
     </a>
     <div class="image-card__info">
-      <div class="image-card__name" title="${data.name}">${data.name}</div>
+      <div class="image-card__name">${data.name}</div>
       <div class="image-card__meta">${data.resolution ? data.resolution + ' · ' : ''}${data.size}</div>
     </div>
   `;
-  // Prepend so newest appears first
   imageGrid.insertBefore(card, imageGrid.firstChild);
 }
 
 function showError(msg) {
   const div = document.createElement('div');
-  div.className = 'upload-error';
-  div.textContent = msg;
+  div.className = 'upload-error'; div.textContent = msg;
   errorsDiv.appendChild(div);
   setTimeout(() => div.remove(), 5000);
+}
+
+// ── Drag & Drop to albums ──
+let draggedImageId = null;
+
+function handleImageDragStart(e, imageId) {
+  draggedImageId = imageId;
+  e.dataTransfer.effectAllowed = 'move';
+  document.getElementById(`img-${imageId}`)?.classList.add('image-card--dragging');
+}
+
+document.addEventListener('dragend', () => {
+  document.querySelectorAll('.image-card--dragging')
+    .forEach(el => el.classList.remove('image-card--dragging'));
+  document.querySelectorAll('.album-card--dragover')
+    .forEach(el => el.classList.remove('album-card--dragover'));
+});
+
+async function handleAlbumDrop(e, albumId) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('album-card--dragover');
+  if (!draggedImageId) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/bulk-move/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ image_ids: [draggedImageId], album_id: albumId }),
+  });
+
+  if (res.ok) {
+    document.getElementById(`img-${draggedImageId}`)?.remove();
+    draggedImageId = null;
+    // Update album image count
+    location.reload();
+  }
+}
+
+// ── Bulk select ──
+function handleCheckboxChange() {
+  const checked = document.querySelectorAll('.image-checkbox:checked');
+  const toolbar = document.getElementById('bulkToolbar');
+  const count   = document.getElementById('bulkCount');
+
+  if (checked.length > 0) {
+    toolbar.style.display = 'flex';
+    count.textContent     = `${checked.length} selected`;
+  } else {
+    toolbar.style.display = 'none';
+  }
+}
+
+document.getElementById('selectAll').addEventListener('change', function() {
+  document.querySelectorAll('.image-checkbox')
+    .forEach(cb => { cb.checked = this.checked; });
+  handleCheckboxChange();
+});
+
+document.getElementById('btnBulkCancel').addEventListener('click', () => {
+  document.querySelectorAll('.image-checkbox').forEach(cb => cb.checked = false);
+  document.getElementById('selectAll').checked = false;
+  document.getElementById('bulkToolbar').style.display = 'none';
+});
+
+document.getElementById('btnBulkMove').addEventListener('click', async () => {
+  const imageIds = getSelectedIds();
+  const albumId  = document.getElementById('bulkMoveTarget').value;
+  if (!imageIds.length) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/bulk-move/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({
+      image_ids: imageIds,
+      album_id:  albumId === 'root' ? null : (albumId || null),
+    }),
+  });
+
+  if (res.ok) location.reload();
+});
+
+document.getElementById('btnBulkDelete').addEventListener('click', async () => {
+  const imageIds = getSelectedIds();
+  if (!imageIds.length) return;
+  if (!confirm(`Delete ${imageIds.length} image(s)?`)) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/bulk-delete/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ image_ids: imageIds }),
+  });
+
+  if (res.ok) {
+    imageIds.forEach(id => document.getElementById(`img-${id}`)?.remove());
+    document.getElementById('bulkToolbar').style.display = 'none';
+  }
+});
+
+function getSelectedIds() {
+  return Array.from(document.querySelectorAll('.image-checkbox:checked'))
+    .map(cb => parseInt(cb.dataset.imageId));
+}
+
+// ── Rename project ──
+document.getElementById('btnRenameProject').addEventListener('click', async () => {
+  const current = document.getElementById('projectTitle').textContent.trim();
+  const name    = prompt('Rename project:', current);
+  if (!name || name === current) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/rename/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ name }),
+  });
+
+  if (res.ok) {
+    const data = await res.json();
+    document.getElementById('projectTitle').textContent = data.name;
+    document.title = `${data.name} — Pixloft`;
+  }
+});
+
+// ── Album modal ──
+document.getElementById('btnNewAlbum').addEventListener('click', () => {
+  document.getElementById('albumModal').style.display = 'flex';
+  setTimeout(() => document.getElementById('albumNameInput').focus(), 50);
+});
+document.getElementById('albumNameInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') createAlbum();
+  if (e.key === 'Escape') closeAlbumModal();
+});
+
+function closeAlbumModal() {
+  document.getElementById('albumModal').style.display = 'none';
+  document.getElementById('albumNameInput').value     = '';
+}
+
+async function createAlbum() {
+  const name = document.getElementById('albumNameInput').value.trim();
+  if (!name) return;
+
+  const formData = new FormData();
+  formData.append('name', name);
+  formData.append('csrfmiddlewaretoken', CSRF_TOKEN);
+
+  const res = await fetch(`/projects/${PROJECT_ID}/albums/create/`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': CSRF_TOKEN },
+    body: formData,
+  });
+
+  if (res.ok) { closeAlbumModal(); location.reload(); }
+}
+
+// ── Rename album ──
+async function renameAlbum(albumId, currentName) {
+  const name = prompt('Rename album:', currentName);
+  if (!name || name === currentName) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/albums/${albumId}/rename/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN },
+    body: JSON.stringify({ name }),
+  });
+
+  if (res.ok) {
+    const data = await res.json();
+    document.getElementById(`albumName-${albumId}`).textContent = data.name;
+  }
+}
+
+// ── Delete album ──
+async function deleteAlbum(albumId) {
+  if (!confirm('Delete album? Images will be moved back to the project.')) return;
+
+  const res = await fetch(`/projects/${PROJECT_ID}/albums/${albumId}/delete/`, {
+    method: 'POST',
+    headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': CSRF_TOKEN },
+  });
+
+  if (res.ok) location.reload();
 }
 </script>
 {% endblock %}

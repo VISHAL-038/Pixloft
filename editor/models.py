@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
-from projects.models import Project
+from projects.models import Project, Album
 from PIL import Image as PilImage
 
 def upload_path(instance, filename):
@@ -9,6 +9,7 @@ def upload_path(instance, filename):
 class Image(models.Model):
     user          = models.ForeignKey(User, on_delete=models.CASCADE, related_name='images')
     project       = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='images')
+    album         = models.ForeignKey(Album, on_delete=models.SET_NULL, null=True, blank=True, related_name='images') 
     file          = models.ImageField(upload_to=upload_path)
     original_name = models.CharField(max_length=255)
     file_size     = models.PositiveIntegerField(null=True, blank=True)  # in bytes
