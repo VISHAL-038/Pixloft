@@ -1008,3 +1008,116 @@ body:has(.editor-shell) main {
   cursor: pointer;
   border: 2px solid var(--bg-1);
 }
+
+/* ===== Histogram — Day 18 ===== */
+.hist-wrap {
+  position: relative;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+  line-height: 0;
+}
+
+#histogramCanvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  cursor: crosshair;
+}
+
+/* Channel toggle buttons */
+.hist-channel-btns {
+  display: flex;
+  gap: 3px;
+}
+.hist-ch-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, opacity 0.15s;
+  padding: 0;
+}
+.hist-ch-btn:hover { background: var(--bg-3); }
+.hist-ch-btn--off  { opacity: 0.3; }
+
+/* Clipping indicators */
+.hist-clip {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+  pointer-events: none;
+}
+.hist-clip--right { left: auto; right: 4px; }
+.hist-clip--active {
+  opacity: 1;
+  color: var(--danger);
+  animation: clipPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes clipPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+/* Hover readout */
+.hist-readout {
+  position: absolute;
+  top: 4px;
+  background: rgba(0,0,0,0.8);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.hist-readout__val {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+/* Stats row */
+.hist-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 4px;
+}
+.hist-stat {
+  background: var(--bg-2);
+  border-radius: 4px;
+  padding: 4px 6px;
+  text-align: center;
+}
+.hist-stat__label {
+  display: block;
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.hist-stat__val {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}

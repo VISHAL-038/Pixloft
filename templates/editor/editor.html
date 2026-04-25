@@ -122,10 +122,47 @@
             </button>
           </div>
 
-      <div class="panel-section">
-        <div class="panel-label">Histogram</div>
-        <canvas class="histogram-canvas" id="histogramCanvas" width="180" height="80"></canvas>
-      </div>
+          <div class="panel-section">
+            <div class="panel-label" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>Histogram</span>
+              <div class="hist-channel-btns">
+                <button class="hist-ch-btn active" data-ch="luma" title="Luminance">L</button>
+                <button class="hist-ch-btn active" data-ch="r"    title="Red"       style="color:#ff5555;">R</button>
+                <button class="hist-ch-btn active" data-ch="g"    title="Green"     style="color:#55cc55;">G</button>
+                <button class="hist-ch-btn active" data-ch="b"    title="Blue"      style="color:#5588ff;">B</button>
+              </div>
+            </div>
+          
+            <!-- Histogram canvas — taller for more detail -->
+            <div class="hist-wrap">
+              <canvas id="histogramCanvas" width="180" height="100"></canvas>
+              <!-- Clipping indicators -->
+              <div class="hist-clip" id="histClipShadow"  title="Shadow clipping">◀</div>
+              <div class="hist-clip hist-clip--right" id="histClipHighlight" title="Highlight clipping">▶</div>
+              <!-- Hover readout -->
+              <div class="hist-readout" id="histReadout" style="display:none;"></div>
+            </div>
+          
+            <!-- Stats row -->
+            <div class="hist-stats" id="histStats">
+              <div class="hist-stat">
+                <span class="hist-stat__label">Mean</span>
+                <span class="hist-stat__val" id="histMean">—</span>
+              </div>
+              <div class="hist-stat">
+                <span class="hist-stat__label">Median</span>
+                <span class="hist-stat__val" id="histMedian">—</span>
+              </div>
+              <div class="hist-stat">
+                <span class="hist-stat__label">Blacks</span>
+                <span class="hist-stat__val" id="histBlacks">—</span>
+              </div>
+              <div class="hist-stat">
+                <span class="hist-stat__label">Whites</span>
+                <span class="hist-stat__val" id="histWhites">—</span>
+              </div>
+            </div>
+          </div>
 
       <div class="panel-section">
         <div class="panel-label">Image Info</div>

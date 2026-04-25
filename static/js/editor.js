@@ -123,6 +123,7 @@ function init() {
   bindCurveChannels();
   bindPresets(); 
   bindExportModal();
+  bindHistogramControls();
 }
 
 // ═══════════════════════════════════════════
@@ -1041,32 +1042,200 @@ function updateZoomLabel() { zoomLabel.textContent = Math.round(state.zoom * 100
 // ═══════════════════════════════════════════
 //  HISTOGRAM
 // ═══════════════════════════════════════════
-function drawHistogram() { clearTimeout(histTimer); histTimer = setTimeout(_drawHistogram, 60); }
+// ═══════════════════════════════════════════
+//  HISTOGRAM — Day 18 enhanced
+// ═══════════════════════════════════════════
+
+// Which channels are visible — toggled by buttons
+const histChannels = { luma: true, r: true, g: true, b: true };
+
+function drawHistogram() {
+  clearTimeout(histTimer);
+  histTimer = setTimeout(_drawHistogram, 60);
+}
 
 function _drawHistogram() {
   if (!state.imageLoaded) return;
-  const hCanvas = document.getElementById('histogramCanvas'); if (!hCanvas) return;
-  const hCtx = hCanvas.getContext('2d'), w = hCanvas.width, h = hCanvas.height;
-  const data  = processPixels(offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height)).data;
-  const rB = new Uint32Array(256), gB = new Uint32Array(256);
-  const bB = new Uint32Array(256), lB = new Uint32Array(256);
+  const hCanvas = document.getElementById('histogramCanvas');
+  if (!hCanvas) return;
 
+  const hCtx = hCanvas.getContext('2d');
+  const w    = hCanvas.width;
+  const h    = hCanvas.height;
+
+  // ── Sample processed pixels ──
+  const srcData   = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
+  const processed = processPixels(srcData);
+  const data      = processed.data;
+  const total     = data.length / 4;
+
+  const rBins = new Uint32Array(256);
+  const gBins = new Uint32Array(256);
+  const bBins = new Uint32Array(256);
+  const lBins = new Uint32Array(256);
+
+  // Sample every 4th pixel for speed
+  let lumaSum = 0;
   for (let i = 0; i < data.length; i += 16) {
-    rB[data[i]]++; gB[data[i+1]]++; bB[data[i+2]]++;
-    lB[Math.round(0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2])]++;
+    const r = data[i], g = data[i+1], b = data[i+2];
+    const l = Math.round(0.299*r + 0.587*g + 0.114*b);
+    rBins[r]++;
+    gBins[g]++;
+    bBins[b]++;
+    lBins[l]++;
+    lumaSum += l;
   }
-  const max = Math.max(...Array.from(rB), ...Array.from(gB), ...Array.from(bB), ...Array.from(lB));
+
+  const sampledPixels = total / 4;
+
+  // ── Stats ──
+  const mean = Math.round(lumaSum / sampledPixels);
+
+  // Median from luma bins
+  let cumulative = 0;
+  let median     = 0;
+  const half     = sampledPixels / 2;
+  for (let i = 0; i < 256; i++) {
+    cumulative += lBins[i];
+    if (cumulative >= half) { median = i; break; }
+  }
+
+  // Clipping — pixels within 5 stops of pure black/white
+  const threshold   = sampledPixels * 0.001; // 0.1%
+  const blacksCount = lBins[0] + lBins[1] + lBins[2] + lBins[3] + lBins[4];
+  const whitesCount = lBins[251] + lBins[252] + lBins[253] + lBins[254] + lBins[255];
+  const hasBlacks   = blacksCount > threshold;
+  const hasWhites   = whitesCount > threshold;
+
+  // Update clipping indicators
+  const clipShadow    = document.getElementById('histClipShadow');
+  const clipHighlight = document.getElementById('histClipHighlight');
+  if (clipShadow)    clipShadow.classList.toggle('hist-clip--active', hasBlacks);
+  if (clipHighlight) clipHighlight.classList.toggle('hist-clip--active', hasWhites);
+
+  // Update stats
+  const meanEl    = document.getElementById('histMean');
+  const medianEl  = document.getElementById('histMedian');
+  const blacksEl  = document.getElementById('histBlacks');
+  const whitesEl  = document.getElementById('histWhites');
+  if (meanEl)   meanEl.textContent   = mean;
+  if (medianEl) medianEl.textContent = median;
+  if (blacksEl) blacksEl.textContent = hasBlacks ? '⚠' : '✓';
+  if (whitesEl) whitesEl.textContent = hasWhites ? '⚠' : '✓';
+  if (blacksEl) blacksEl.style.color = hasBlacks ? 'var(--danger)' : 'var(--success, #4caf7d)';
+  if (whitesEl) whitesEl.style.color = hasWhites ? 'var(--danger)' : 'var(--success, #4caf7d)';
+
+  // ── Find max for scaling ──
+  const activeBins = [];
+  if (histChannels.luma) activeBins.push(...Array.from(lBins));
+  if (histChannels.r)    activeBins.push(...Array.from(rBins));
+  if (histChannels.g)    activeBins.push(...Array.from(gBins));
+  if (histChannels.b)    activeBins.push(...Array.from(bBins));
+
+  if (activeBins.length === 0) return;
+
+  // Use 95th percentile as max to prevent a single spike dominating
+  const sorted = [...activeBins].sort((a, b) => a - b);
+  const p95    = sorted[Math.floor(sorted.length * 0.95)];
+  const max    = Math.max(p95, 1);
+
+  // ── Draw ──
   hCtx.clearRect(0, 0, w, h);
 
-  [[lB,'rgba(255,255,255,0.12)'], [rB,'rgba(255,75,75,0.5)'],
-   [gB,'rgba(75,200,75,0.5)'],   [bB,'rgba(75,130,255,0.5)']].forEach(([bins, color]) => {
+  // Background
+  hCtx.fillStyle = '#18181c';
+  hCtx.fillRect(0, 0, w, h);
+
+  // Grid lines
+  hCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+  hCtx.lineWidth   = 0.5;
+  [64, 128, 192].forEach(x => {
+    const px = (x / 255) * w;
+    hCtx.beginPath(); hCtx.moveTo(px, 0); hCtx.lineTo(px, h); hCtx.stroke();
+  });
+  [0.25, 0.5, 0.75].forEach(y => {
+    hCtx.beginPath(); hCtx.moveTo(0, h*y); hCtx.lineTo(w, h*y); hCtx.stroke();
+  });
+
+  // Draw channels
+  const channels = [
+    { bins: lBins, color: 'rgba(255,255,255,0.15)', active: histChannels.luma },
+    { bins: rBins, color: 'rgba(255,75,75,0.55)',   active: histChannels.r    },
+    { bins: gBins, color: 'rgba(75,200,75,0.55)',   active: histChannels.g    },
+    { bins: bBins, color: 'rgba(75,130,255,0.55)',  active: histChannels.b    },
+  ];
+
+  channels.forEach(({ bins, color, active }) => {
+    if (!active) return;
     hCtx.beginPath();
     for (let i = 0; i < 256; i++) {
-      const x = (i/255)*w, y = h - (bins[i]/max)*(h-2);
+      const x = (i / 255) * w;
+      const y = h - Math.min((bins[i] / max) * h, h);
       i === 0 ? hCtx.moveTo(x, y) : hCtx.lineTo(x, y);
     }
-    hCtx.lineTo(w, h); hCtx.lineTo(0, h); hCtx.closePath();
-    hCtx.fillStyle = color; hCtx.fill();
+    hCtx.lineTo(w, h); hCtx.lineTo(0, h);
+    hCtx.closePath();
+    hCtx.fillStyle = color;
+    hCtx.fill();
+  });
+
+  // Shadow / Highlight clipping overlay zones
+  if (hasBlacks) {
+    const grad = hCtx.createLinearGradient(0, 0, 12, 0);
+    grad.addColorStop(0, 'rgba(80,80,255,0.3)');
+    grad.addColorStop(1, 'transparent');
+    hCtx.fillStyle = grad;
+    hCtx.fillRect(0, 0, 12, h);
+  }
+  if (hasWhites) {
+    const grad = hCtx.createLinearGradient(w-12, 0, w, 0);
+    grad.addColorStop(0, 'transparent');
+    grad.addColorStop(1, 'rgba(255,80,80,0.3)');
+    hCtx.fillStyle = grad;
+    hCtx.fillRect(w-12, 0, 12, h);
+  }
+
+  // Store bins for hover readout
+  hCanvas._bins  = { r: rBins, g: gBins, b: bBins, l: lBins };
+  hCanvas._max   = max;
+  hCanvas._total = sampledPixels;
+}
+
+// ── Channel toggle buttons ──
+function bindHistogramControls() {
+  document.querySelectorAll('.hist-ch-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const ch = btn.dataset.ch;
+      histChannels[ch] = !histChannels[ch];
+      btn.classList.toggle('hist-ch-btn--off', !histChannels[ch]);
+      drawHistogram();
+    });
+  });
+
+  // ── Hover readout ──
+  const hCanvas = document.getElementById('histogramCanvas');
+  const readout = document.getElementById('histReadout');
+  if (!hCanvas || !readout) return;
+
+  hCanvas.addEventListener('mousemove', e => {
+    if (!hCanvas._bins) return;
+    const rect  = hCanvas.getBoundingClientRect();
+    const x     = e.clientX - rect.left;
+    const value = Math.round((x / rect.width) * 255);
+    const bins  = hCanvas._bins;
+
+    readout.style.display = 'block';
+    readout.style.left    = `${Math.min(x, hCanvas.offsetWidth - 80)}px`;
+    readout.innerHTML     = `
+      <div class="hist-readout__val">${value}</div>
+      <div style="color:#ff5555;">R: ${bins.r[value] || 0}</div>
+      <div style="color:#55cc55;">G: ${bins.g[value] || 0}</div>
+      <div style="color:#5588ff;">B: ${bins.b[value] || 0}</div>
+    `;
+  });
+
+  hCanvas.addEventListener('mouseleave', () => {
+    readout.style.display = 'none';
   });
 }
 
