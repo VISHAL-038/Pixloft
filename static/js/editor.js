@@ -66,8 +66,13 @@ const state = {
     noise_detail:    50,
     noise_contrast:  0,
     // Effects
-    vignette:        0,
-    grain:           0,
+    vignette:          0,
+    vignette_size:     50,
+    vignette_feather:  50,
+    vignette_roundness:50,
+    grain:             0,
+    grain_size:        25,
+    grain_roughness:   50,
     // Transform
     rotation:        0,
     flipH:           false,
@@ -728,6 +733,175 @@ function applyNoiseReduction(imageData, amount, detail, contrastBoost) {
 }
 
 // ═══════════════════════════════════════════
+//  VIGNETTE ENGINE
+//  Radial gradient darkening/lightening
+//  around the edges of the image
+// ═══════════════════════════════════════════
+function applyVignette(imageData, amount, size, feather, roundness) {
+  if (amount === 0) return imageData;
+
+  const width  = imageData.width;
+  const height = imageData.height;
+  const data   = new Uint8ClampedArray(imageData.data);
+
+  // Normalise params
+  const strength  = amount / 100;           // −1 … +1
+  const radius    = (size / 100) * 0.85;    // 0 … 0.85 (fraction of half-diagonal)
+  const softness  = (feather / 100) * 0.6;  // falloff width
+  const roundness_val = roundness / 100;     // 0=oval, 1=circle
+
+  const cx = width  / 2;
+  const cy = height / 2;
+
+  // Half-diagonal for normalisation
+  const diag = Math.sqrt(cx*cx + cy*cy);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      // Normalised distance from center
+      // roundness blends between elliptical (0) and circular (1)
+      const dx     = (x - cx) / cx;
+      const dy     = (y - cy) / cy;
+      const ellDist = Math.sqrt(dx*dx + dy*dy);
+      const cirDist = Math.sqrt(
+        ((x-cx)*(x-cx) + (y-cy)*(y-cy))
+      ) / diag;
+      const dist   = ellDist * (1 - roundness_val) + cirDist * roundness_val * 2;
+
+      // Smooth falloff using smoothstep
+      const inner  = radius;
+      const outer  = radius + softness + 0.1;
+      const t      = Math.max(0, Math.min(1, (dist - inner) / (outer - inner)));
+      const smooth = t * t * (3 - 2 * t); // smoothstep
+
+      // Vignette factor:
+      // positive amount = darken edges (negative = lighten, like Lightroom)
+      const factor = smooth * strength;
+
+      const idx    = (y * width + x) * 4;
+
+      if (factor > 0) {
+        // Darken
+        data[idx]     = Math.max(0, data[idx]     * (1 - factor));
+        data[idx + 1] = Math.max(0, data[idx + 1] * (1 - factor));
+        data[idx + 2] = Math.max(0, data[idx + 2] * (1 - factor));
+      } else if (factor < 0) {
+        // Lighten (negative vignette)
+        const lift    = -factor;
+        data[idx]     = Math.min(255, data[idx]     + (255 - data[idx])     * lift);
+        data[idx + 1] = Math.min(255, data[idx + 1] + (255 - data[idx + 1]) * lift);
+        data[idx + 2] = Math.min(255, data[idx + 2] + (255 - data[idx + 2]) * lift);
+      }
+    }
+  }
+
+  return new ImageData(data, width, height);
+}
+
+// ═══════════════════════════════════════════
+//  FILM GRAIN ENGINE
+//  Authentic film grain with:
+//  - Luminance-dependent grain (shadows get more)
+//  - Size control via averaging
+//  - Roughness controls grain distribution
+// ═══════════════════════════════════════════
+
+// Cache grain layer so it doesn't regenerate on every slider move
+// Only regenerates when grain params change or image size changes
+let _grainCache    = null;
+let _grainCacheKey = '';
+
+function applyGrain(imageData, amount, grainSize, roughness) {
+  if (amount === 0) return imageData;
+
+  const width    = imageData.width;
+  const height   = imageData.height;
+  const data     = new Uint8ClampedArray(imageData.data);
+  const strength = amount / 100;
+
+  // Cache key — regenerate grain when params or size changes
+  const cacheKey = `${width}x${height}_${grainSize}_${roughness}`;
+  if (_grainCacheKey !== cacheKey || !_grainCache) {
+    _grainCache    = generateGrainLayer(width, height, grainSize, roughness);
+    _grainCacheKey = cacheKey;
+  }
+
+  const grain = _grainCache;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r     = data[i];
+    const g     = data[i + 1];
+    const b     = data[i + 2];
+    const luma  = 0.299*r + 0.587*g + 0.114*b;
+
+    // Film grain is strongest in midtones, less in deep shadows/highlights
+    // This matches real film behaviour
+    const lumaFactor = 1 - Math.pow(Math.abs(luma/128 - 1), 2) * 0.5;
+    const pixelIdx   = i / 4;
+    const g_val      = grain[pixelIdx] * strength * lumaFactor;
+
+    data[i]     = Math.max(0, Math.min(255, r + g_val));
+    data[i + 1] = Math.max(0, Math.min(255, g + g_val));
+    data[i + 2] = Math.max(0, Math.min(255, b + g_val));
+  }
+
+  return new ImageData(data, width, height);
+}
+
+function generateGrainLayer(width, height, grainSize, roughness) {
+  const total  = width * height;
+  const grain  = new Float32Array(total);
+  const rough  = roughness / 100;
+
+  // Generate base noise at reduced resolution for "size" effect
+  // then scale back up
+  const scale = Math.max(1, Math.round(grainSize / 25));
+
+  // Use a simple LCG pseudo-random number generator for speed
+  // (Math.random() is too slow for megapixel images)
+  let seed = 12345;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return (seed >>> 0) / 0xffffffff;
+  };
+
+  if (scale === 1) {
+    // Fine grain — one value per pixel
+    for (let i = 0; i < total; i++) {
+      // Box-Muller transform for Gaussian distribution
+      // This gives more natural grain than uniform noise
+      const u1 = Math.max(1e-10, rand());
+      const u2  = rand();
+      const mag = rough * 60;
+      grain[i]  = mag * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+  } else {
+    // Coarser grain — generate at reduced size then scale up
+    const sw = Math.ceil(width  / scale);
+    const sh = Math.ceil(height / scale);
+    const small = new Float32Array(sw * sh);
+
+    for (let i = 0; i < small.length; i++) {
+      const u1  = Math.max(1e-10, rand());
+      const u2  = rand();
+      const mag = rough * 60;
+      small[i]  = mag * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+
+    // Nearest-neighbour scale-up
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const sx = Math.min(Math.floor(x / scale), sw - 1);
+        const sy = Math.min(Math.floor(y / scale), sh - 1);
+        grain[y * width + x] = small[sy * sw + sx];
+      }
+    }
+  }
+
+  return grain;
+}
+
+// ═══════════════════════════════════════════
 //  CROP STATE
 // ═══════════════════════════════════════════
 const crop = {
@@ -954,6 +1128,25 @@ function processPixels(srcData) {
   // Sharpening
   if (p.sharpness > 0)
     result = applySharpen(result, p.sharpness, p.sharpen_radius ?? 1, p.sharpen_detail ?? 25);
+
+  // ── Vignette (applied after sharpening) ──
+  if (p.vignette !== 0)
+    result = applyVignette(
+      result,
+      p.vignette,
+      p.vignette_size     ?? 50,
+      p.vignette_feather  ?? 50,
+      p.vignette_roundness ?? 50
+    );
+
+  // ── Film grain (applied last) ──
+  if (p.grain > 0)
+    result = applyGrain(
+      result,
+      p.grain,
+      p.grain_size      ?? 25,
+      p.grain_roughness ?? 50
+    );
 
   return result;
 }
@@ -1924,11 +2117,23 @@ function resetToOriginal() {
   offscreenCtx     = offscreen.getContext('2d', { willReadFrequently: true });
   offscreenCtx.drawImage(state.originalImage, 0, 0);
 
+  // Default values for params that aren't 0
+  const PARAM_DEFAULTS = {
+    sharpen_radius:    1,
+    sharpen_detail:    25,
+    noise_detail:      50,
+    vignette_size:     50,
+    vignette_feather:  50,
+    vignette_roundness:50,
+    grain_size:        25,
+    grain_roughness:   50,
+  };
+
   Object.keys(state.params).forEach(k => {
     if (k === 'hsl' || k === 'curve') return;
     if (k === 'flipH' || k === 'flipV') { state.params[k] = false; return; }
     if (k === 'crop') { state.params[k] = null; return; }
-    state.params[k] = 0;
+    state.params[k] = PARAM_DEFAULTS[k] ?? 0;
   });
   Object.keys(state.params.hsl).forEach(band => { state.params.hsl[band] = { hue:0, sat:0, lum:0 }; });
   Object.keys(state.params.curve).forEach(ch => { state.params.curve[ch] = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]]; });
@@ -1943,6 +2148,10 @@ function resetToOriginal() {
 
   if (curveCanvas) drawCurveCanvas();
   try { localStorage.removeItem(LS_KEY); } catch (e) {}
+
+  // Clear grain cache so it regenerates for new image
+  _grainCache    = null;
+  _grainCacheKey = '';
 
   syncSliders(); updateHslDots(); fitToScreen(); redraw(); drawHistogram();
   state.history = []; state.historyIndex = -1;

@@ -485,24 +485,68 @@
   </div>
 
         <!-- Effects -->
-        <div class="accordion-section">
-          <button class="accordion-header">
-            <span>✦ Effects</span>
-            <span class="accordion-arrow">▾</span>
-          </button>
-          <div class="accordion-body" style="display:none;">
-            <div class="slider-row">
-              <label>Vignette</label>
-              <input type="range" min="-100" max="100" value="0" data-param="vignette" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-            <div class="slider-row">
-              <label>Grain</label>
-              <input type="range" min="0" max="100" value="0" data-param="grain" class="adj-slider">
-              <span class="slider-val">0</span>
-            </div>
-          </div>
-        </div>
+        <!-- Effects -->
+<div class="accordion-section">
+  <button class="accordion-header">
+    <span>✦ Effects</span>
+    <span class="accordion-arrow">▾</span>
+  </button>
+  <div class="accordion-body" style="display:none;">
+
+    <!-- Vignette -->
+    <div class="detail-group">
+      <div class="detail-group__label">Vignette</div>
+      <div class="slider-row">
+        <label>Amount</label>
+        <input type="range" min="-100" max="100" value="0"
+               data-param="vignette" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Size</label>
+        <input type="range" min="0" max="100" value="50"
+               data-param="vignette_size" class="adj-slider">
+        <span class="slider-val">50</span>
+      </div>
+      <div class="slider-row">
+        <label>Feather</label>
+        <input type="range" min="0" max="100" value="50"
+               data-param="vignette_feather" class="adj-slider">
+        <span class="slider-val">50</span>
+      </div>
+      <div class="slider-row">
+        <label>Roundness</label>
+        <input type="range" min="0" max="100" value="50"
+               data-param="vignette_roundness" class="adj-slider">
+        <span class="slider-val">50</span>
+      </div>
+    </div>
+
+    <!-- Grain -->
+    <div class="detail-group">
+      <div class="detail-group__label">Film Grain</div>
+      <div class="slider-row">
+        <label>Amount</label>
+        <input type="range" min="0" max="100" value="0"
+               data-param="grain" class="adj-slider">
+        <span class="slider-val">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Size</label>
+        <input type="range" min="1" max="100" value="25"
+               data-param="grain_size" class="adj-slider">
+        <span class="slider-val">25</span>
+      </div>
+      <div class="slider-row">
+        <label>Roughness</label>
+        <input type="range" min="0" max="100" value="50"
+               data-param="grain_roughness" class="adj-slider">
+        <span class="slider-val">50</span>
+      </div>
+    </div>
+
+  </div>
+</div>
 
       </div>
       <!-- end accordion -->
