@@ -129,6 +129,9 @@ function init() {
   bindPresets(); 
   bindExportModal();
   bindHistogramControls();
+  initTooltips();          
+  bindShortcutsPanel();    
+  loadProjectImages(); 
 }
 
 // ═══════════════════════════════════════════
@@ -1433,6 +1436,252 @@ function bindHistogramControls() {
 }
 
 // ═══════════════════════════════════════════
+//  TOOLTIP SYSTEM
+// ═══════════════════════════════════════════
+let tooltipEl      = null;
+let tooltipTimer   = null;
+
+function initTooltips() {
+  tooltipEl = document.getElementById('globalTooltip');
+  if (!tooltipEl) return;
+
+  document.addEventListener('mouseover', e => {
+    const target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => {
+      showTooltip(target.dataset.tooltip, target);
+    }, 500);
+  });
+
+  document.addEventListener('mouseout', e => {
+    const target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+    clearTimeout(tooltipTimer);
+    hideTooltip();
+  });
+
+  // Hide on scroll or click
+  document.addEventListener('scroll', hideTooltip, true);
+  document.addEventListener('click',  hideTooltip, true);
+}
+
+function showTooltip(text, anchor) {
+  if (!tooltipEl || !text) return;
+  tooltipEl.textContent   = text;
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.opacity = '0';
+
+  const rect    = anchor.getBoundingClientRect();
+  const tRect   = tooltipEl.getBoundingClientRect();
+  const scrollY = window.scrollY || 0;
+
+  // Position below the anchor, centred
+  let left = rect.left + (rect.width / 2) - (tRect.width / 2);
+  let top  = rect.bottom + scrollY + 6;
+
+  // Keep within viewport
+  left = Math.max(8, Math.min(left, window.innerWidth - tRect.width - 8));
+
+  tooltipEl.style.left    = `${left}px`;
+  tooltipEl.style.top     = `${top}px`;
+  tooltipEl.style.opacity = '1';
+}
+
+function hideTooltip() {
+  if (!tooltipEl) return;
+  tooltipEl.style.opacity = '0';
+  setTimeout(() => {
+    if (tooltipEl) tooltipEl.style.display = 'none';
+  }, 150);
+}
+
+// ═══════════════════════════════════════════
+//  SHORTCUTS PANEL TOGGLE
+// ═══════════════════════════════════════════
+function bindShortcutsPanel() {
+  const btn   = document.getElementById('btnToggleShortcuts');
+  const panel = document.getElementById('shortcutsPanel');
+  if (!btn || !panel) return;
+
+  btn.addEventListener('click', () => {
+    const isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+    btn.textContent     = isOpen ? '?' : '✕';
+    btn.style.color     = isOpen ? '' : 'var(--accent)';
+  });
+}
+
+// ═══════════════════════════════════════════
+//  IMAGE CYCLING — arrow keys navigate
+//  between images in the same project
+// ═══════════════════════════════════════════
+let projectImages     = [];
+let currentImageIndex = -1;
+
+async function loadProjectImages() {
+  try {
+    const res  = await fetch(`/editor/api/project-images/${IMAGE_ID}/`);
+    if (!res.ok) return;
+    const data = await res.json();
+    projectImages     = data.images || [];
+    currentImageIndex = projectImages.findIndex(img => img.id === IMAGE_ID);
+    updateCycleHints();
+  } catch (e) {
+    // Silently fail — cycling is optional
+  }
+}
+
+function updateCycleHints() {
+  const hasPrev = currentImageIndex > 0;
+  const hasNext = currentImageIndex < projectImages.length - 1;
+
+  // Update hint text on canvas
+  if (projectImages.length > 1) {
+    const pos = `${currentImageIndex + 1} / ${projectImages.length}`;
+    showHint(`Image ${pos} · ← → to cycle`);
+  }
+}
+
+function cycleImage(direction) {
+  if (projectImages.length < 2) return;
+  const newIndex = currentImageIndex + direction;
+  if (newIndex < 0 || newIndex >= projectImages.length) return;
+
+  // Save current state before navigating
+  autoSave();
+
+  const nextImage = projectImages[newIndex];
+  showHint(`Going to ${nextImage.name}...`);
+  setTimeout(() => {
+    window.location.href = `/editor/${nextImage.id}/`;
+  }, 300);
+}
+
+// ═══════════════════════════════════════════
+//  ENHANCED KEYBOARD SHORTCUTS
+// ═══════════════════════════════════════════
+function bindKeyboard() {
+  document.addEventListener('keydown', e => {
+    // Don't fire shortcuts when typing in inputs
+    if (e.target.tagName === 'INPUT'    ||
+        e.target.tagName === 'TEXTAREA' ||
+        e.target.tagName === 'SELECT'   ||
+        e.target.isContentEditable) return;
+
+    const cx = canvas.width  / 2;
+    const cy = canvas.height / 2;
+
+    // ── Ctrl / Cmd shortcuts ──
+    if (e.ctrlKey || e.metaKey) {
+      switch (e.key) {
+        case 'z':
+          e.preventDefault();
+          e.shiftKey ? redo() : undo();
+          return;
+        case 'y':
+          e.preventDefault(); redo(); return;
+        case 's':
+          e.preventDefault();
+          document.getElementById('btnSaveState')?.click();
+          return;
+        case 'e':
+          e.preventDefault(); openExportModal(); return;
+      }
+      return; // don't process other shortcuts with Ctrl held
+    }
+
+    // ── Single key shortcuts ──
+    switch (e.key) {
+      // Zoom
+      case '0': fitToScreen(); break;
+      case '1': zoomTo(1, cx, cy); break;
+      case '2': zoomTo(2, cx, cy); break;
+      case '+':
+      case '=': zoomTo(state.zoom * 1.25, cx, cy); break;
+      case '-': zoomTo(state.zoom * 0.80, cx, cy); break;
+
+      // Edit actions
+      case 'b': case 'B':
+        document.getElementById('btnBefore')?.click(); break;
+      case 'r': case 'R':
+        document.getElementById('btnReset')?.click(); break;
+
+      // Export / Save
+      case 'e': case 'E':
+        if (!e.ctrlKey && !e.metaKey) openExportModal(); break;
+      case 's': case 'S':
+        if (!e.ctrlKey && !e.metaKey)
+          document.getElementById('btnSaveState')?.click();
+        break;
+
+      // Tools
+      case 'c': case 'C':
+        document.querySelector('[data-tool="crop"]')?.click(); break;
+      case 'v': case 'V':
+        document.querySelector('[data-tool="select"]')?.click(); break;
+
+      // Crop actions
+      case 'Enter':
+        if (crop.active) { applyCrop(); } break;
+      case 'Escape':
+        if (crop.active) deactivateCrop();
+        else hideTooltip();
+        break;
+
+      // Image cycling
+      case 'ArrowLeft':
+        e.preventDefault(); cycleImage(-1); break;
+      case 'ArrowRight':
+        e.preventDefault(); cycleImage(1);  break;
+
+      // Fit
+      case 'f': case 'F':
+        fitToScreen(); break;
+
+      // History shortcuts panel
+      case '?':
+        document.getElementById('btnToggleShortcuts')?.click(); break;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════
+//  UX IMPROVEMENTS
+// ═══════════════════════════════════════════
+
+// Double-click slider label resets it — already done
+// Add visual feedback when shortcut fires
+
+function flashHint(msg) {
+  showHint(msg);
+}
+
+// Unsaved changes warning
+let hasUnsavedChanges = false;
+
+function markDirty() {
+  hasUnsavedChanges = true;
+}
+
+function markClean() {
+  hasUnsavedChanges = false;
+}
+
+window.addEventListener('beforeunload', e => {
+  if (hasUnsavedChanges && state.historyIndex > 0) {
+    e.preventDefault();
+    e.returnValue = 'You have unsaved edits. Leave anyway?';
+  }
+});
+
+// Mark dirty on every edit
+const _origPushHistory = pushHistory;
+// We wrap pushHistory to track dirty state
+// This is done inline — see updated pushHistory below
+
+// ═══════════════════════════════════════════
 //  SLIDER BINDING
 // ═══════════════════════════════════════════
 function bindSliders() {
@@ -1555,6 +1804,9 @@ function pushHistory() {
   if (state.history.length > state.maxHistory) state.history.shift();
   state.historyIndex = state.history.length - 1;
   updateHistoryBtns(); updateHistoryPanel(); autoSave();
+  hasUnsavedChanges = true;
+  // Show dirty dot on filename
+  document.querySelector('.topbar-filename')?.classList.add('dirty');
 }
 
 function undo() { if (state.historyIndex <= 0) return; state.historyIndex--; restoreHistory(state.history[state.historyIndex]); }
@@ -2055,6 +2307,8 @@ function saveStateToFile() {
   a.href = url; a.download = name.replace(/\.[^.]+$/, '') + '.pixloft.json';
   a.click(); URL.revokeObjectURL(url);
   showHint(`State saved → ${a.download}`);
+  document.querySelector('.topbar-filename')?.classList.remove('dirty');
+  hasUnsavedChanges = false;
 }
 
 function loadStateFromFile(file) {
@@ -2118,23 +2372,23 @@ function resetToOriginal() {
   offscreenCtx.drawImage(state.originalImage, 0, 0);
 
   // Default values for params that aren't 0
-  const PARAM_DEFAULTS = {
-    sharpen_radius:    1,
-    sharpen_detail:    25,
-    noise_detail:      50,
-    vignette_size:     50,
-    vignette_feather:  50,
-    vignette_roundness:50,
-    grain_size:        25,
-    grain_roughness:   50,
-  };
+const PARAM_DEFAULTS = {
+  sharpen_radius:    1,
+  sharpen_detail:    25,
+  noise_detail:      50,
+  vignette_size:     50,
+  vignette_feather:  50,
+  vignette_roundness:50,
+  grain_size:        25,
+  grain_roughness:   50,
+};
 
-  Object.keys(state.params).forEach(k => {
-    if (k === 'hsl' || k === 'curve') return;
-    if (k === 'flipH' || k === 'flipV') { state.params[k] = false; return; }
-    if (k === 'crop') { state.params[k] = null; return; }
-    state.params[k] = PARAM_DEFAULTS[k] ?? 0;
-  });
+Object.keys(state.params).forEach(k => {
+  if (k === 'hsl' || k === 'curve') return;
+  if (k === 'flipH' || k === 'flipV') { state.params[k] = false; return; }
+  if (k === 'crop') { state.params[k] = null; return; }
+  state.params[k] = PARAM_DEFAULTS[k] ?? 0;
+});
   Object.keys(state.params.hsl).forEach(band => { state.params.hsl[band] = { hue:0, sat:0, lum:0 }; });
   Object.keys(state.params.curve).forEach(ch => { state.params.curve[ch] = [[0,0],[0.25,0.25],[0.75,0.75],[1,1]]; });
 
@@ -2157,6 +2411,7 @@ function resetToOriginal() {
   state.history = []; state.historyIndex = -1;
   pushHistory(); updateHistoryPanel(); updateHistoryBtns();
   showHint('Reset to original image ◉');
+  hasUnsavedChanges = false;
 }
 
 // ═══════════════════════════════════════════

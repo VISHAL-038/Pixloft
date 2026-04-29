@@ -8,4 +8,5 @@ urlpatterns = [
     path('api/upload/',            views.upload_image,  name='upload'),
     path('api/delete/<int:image_id>/', views.delete_image, name='delete'),
     path('api/export/<int:image_id>/', views.export_image,  name='export'),
+        path('api/project-images/<int:image_id>/', views.project_images, name='project_images'),
 ]

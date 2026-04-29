@@ -463,3 +463,16 @@ def _apply_hsl_np(arr, hsl_params):
     out[has_edit, 1] = np.clip(ng[has_edit] * 255, 0, 255)
     out[has_edit, 2] = np.clip(nb[has_edit] * 255, 0, 255)
     return out
+
+@login_required
+def project_images(request, image_id):
+    """Returns ordered list of images in the same project — for arrow key cycling."""
+    image   = get_object_or_404(Image, pk=image_id, user=request.user)
+    if not image.project:
+        return JsonResponse({'images': []})
+
+    images = Image.objects.filter(
+        project=image.project
+    ).order_by('created_at').values('id', 'original_name')
+
+    return JsonResponse({'images': list(images)})

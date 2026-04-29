@@ -19,22 +19,32 @@
     </div>
 
     <div class="topbar-center">
-      <button class="topbar-btn" id="btnZoomOut" title="Zoom out">−</button>
+      <button class="topbar-btn" id="btnZoomOut"
+              data-tooltip="Zoom out (-)">−</button>
       <span class="topbar-zoom" id="zoomLabel">100%</span>
-      <button class="topbar-btn" id="btnZoomIn" title="Zoom in">+</button>
-      <button class="topbar-btn" id="btnFit" title="Fit to screen">⊡</button>
+      <button class="topbar-btn" id="btnZoomIn"
+              data-tooltip="Zoom in (+)">+</button>
+      <button class="topbar-btn" id="btnFit"
+              data-tooltip="Fit to screen (0)">⊡</button>
     </div>
 
     <div class="topbar-right">
-        <button class="topbar-btn" id="btnUndo" title="Undo (Ctrl+Z)" disabled>↩ Undo</button>
-        <button class="topbar-btn" id="btnRedo" title="Redo (Ctrl+Y)" disabled>↪ Redo</button>
-        <button class="topbar-btn" id="btnBefore" title="Before/After (B)">◧ Before</button>
-        <button class="topbar-btn" id="btnReset" title="Reset all edits (R)">↺ Reset</button>
-        <button class="topbar-btn" id="btnSaveState" title="Save edit state as JSON">⬇ Save State</button>
-        <button class="topbar-btn" id="btnLoadState" title="Load edit state from JSON">⬆ Load State</button>
-        <input type="file" id="stateFileInput" accept=".json" style="display:none;">
-        <button class="btn btn--primary" id="btnExport">⬇ Export</button>
-      </div>
+      <button class="topbar-btn" id="btnUndo"
+              title="Undo" data-tooltip="Undo (Ctrl+Z)" disabled>↩ Undo</button>
+      <button class="topbar-btn" id="btnRedo"
+              title="Redo" data-tooltip="Redo (Ctrl+Y)" disabled>↪ Redo</button>
+      <button class="topbar-btn" id="btnBefore"
+              data-tooltip="Before/After toggle (B)">◧ Before</button>
+      <button class="topbar-btn" id="btnReset"
+              data-tooltip="Reset all edits (R)">↺ Reset</button>
+      <button class="topbar-btn" id="btnSaveState"
+              data-tooltip="Save edit state to JSON (S)">⬇ Save State</button>
+      <button class="topbar-btn" id="btnLoadState"
+              data-tooltip="Load edit state from JSON">⬆ Load State</button>
+      <input type="file" id="stateFileInput" accept=".json" style="display:none;">
+      <button class="btn btn--primary" id="btnExport"
+              data-tooltip="Export image (E)">⬇ Export</button>
+    </div>
   </header>
 
   <!-- ===== MAIN EDITOR AREA ===== -->
@@ -45,19 +55,23 @@
         <div class="panel-section">
             <div class="panel-label">Tools</div>
             <div class="tool-grid">
-              <button class="tool-btn active" id="toolSelect" data-tool="select" title="Select">
+              <button class="tool-btn active" id="toolSelect" data-tool="select"
+                    data-tooltip="Select tool">
                 <span class="tool-icon">↖</span>
                 <span class="tool-name">Select</span>
               </button>
-              <button class="tool-btn" id="toolCrop" data-tool="crop" title="Crop (C)">
+              <button class="tool-btn" id="toolCrop" data-tool="crop"
+                      data-tooltip="Crop tool (C)">
                 <span class="tool-icon">⊡</span>
                 <span class="tool-name">Crop</span>
               </button>
-              <button class="tool-btn" id="toolRotate" data-tool="rotate" title="Rotate">
+              <button class="tool-btn" id="toolRotate" data-tool="rotate"
+                      data-tooltip="Rotate & Flip">
                 <span class="tool-icon">↻</span>
                 <span class="tool-name">Rotate</span>
               </button>
-              <button class="tool-btn" id="toolFlip" data-tool="flip" title="Flip">
+              <button class="tool-btn" id="toolFlip" data-tool="flip"
+                      data-tooltip="Flip image">
                 <span class="tool-icon">⇔</span>
                 <span class="tool-name">Flip</span>
               </button>
@@ -187,6 +201,44 @@
     <button class="history-clear-btn" id="btnClearHistory" title="Clear history">✕</button>
   </div>
   <div class="history-list" id="historyList"></div>
+</div>
+
+<!-- Keyboard Shortcuts Panel -->
+<div class="panel-section">
+  <div class="panel-label" style="display:flex;justify-content:space-between;align-items:center;">
+    <span>Shortcuts</span>
+    <button class="history-clear-btn" id="btnToggleShortcuts" title="Toggle shortcuts">?</button>
+  </div>
+  <div id="shortcutsPanel" style="display:none;">
+    <div class="shortcut-group">
+      <div class="shortcut-group__label">Navigation</div>
+      <div class="shortcut-row"><kbd>0</kbd><span>Fit to screen</span></div>
+      <div class="shortcut-row"><kbd>1</kbd><span>100% zoom</span></div>
+      <div class="shortcut-row"><kbd>2</kbd><span>200% zoom</span></div>
+      <div class="shortcut-row"><kbd>+</kbd><span>Zoom in</span></div>
+      <div class="shortcut-row"><kbd>-</kbd><span>Zoom out</span></div>
+      <div class="shortcut-row"><kbd>Space</kbd><span>Pan (hold)</span></div>
+      <div class="shortcut-row"><kbd>← →</kbd><span>Cycle images</span></div>
+    </div>
+    <div class="shortcut-group">
+      <div class="shortcut-group__label">Editing</div>
+      <div class="shortcut-row"><kbd>Ctrl Z</kbd><span>Undo</span></div>
+      <div class="shortcut-row"><kbd>Ctrl Y</kbd><span>Redo</span></div>
+      <div class="shortcut-row"><kbd>R</kbd><span>Reset all edits</span></div>
+      <div class="shortcut-row"><kbd>B</kbd><span>Before / After</span></div>
+    </div>
+    <div class="shortcut-group">
+      <div class="shortcut-group__label">Tools</div>
+      <div class="shortcut-row"><kbd>C</kbd><span>Crop tool</span></div>
+      <div class="shortcut-row"><kbd>Enter</kbd><span>Apply crop</span></div>
+      <div class="shortcut-row"><kbd>Esc</kbd><span>Cancel crop</span></div>
+    </div>
+    <div class="shortcut-group">
+      <div class="shortcut-group__label">File</div>
+      <div class="shortcut-row"><kbd>E</kbd><span>Export image</span></div>
+      <div class="shortcut-row"><kbd>S</kbd><span>Save state</span></div>
+    </div>
+  </div>
 </div>
     </aside>
 
@@ -598,7 +650,8 @@
     </div>
   </div>
 </div>
-
+<!-- Global tooltip -->
+<div class="global-tooltip" id="globalTooltip"></div>
 </div>
 <!-- end editor-shell -->
 {% endblock %}
