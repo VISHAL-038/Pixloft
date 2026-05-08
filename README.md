@@ -21,7 +21,6 @@ A powerful, browser-based photo editing web application built with Django and va
 - **Server-Side Export** — High-quality JPEG/PNG export powered by Pillow
 - **Album Management** — Organise images into albums with bulk select support
 - **Keyboard Shortcuts** — Global hotkeys for power users
-- **Responsive Design** — Mobile-friendly layout with touch gesture support
 
 ---
 
@@ -32,7 +31,7 @@ A powerful, browser-based photo editing web application built with Django and va
 | Backend | Python, Django |
 | Frontend | HTML5, CSS3, Vanilla JavaScript |
 | Image Processing | Pillow (server-side), Canvas API (client-side) |
-| Database | SQLite (dev) / PostgreSQL (prod) |
+| Database | SQLite  |
 | Auth | Django built-in auth system |
 | Version Control | Git |
 
@@ -188,15 +187,9 @@ Contributions are welcome! Please open an issue first to discuss what you'd like
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
-
 ## 👤 Author
 
-**Your Name**
+**Vishal**
 - GitHub: [@vishal-038](https://github.com/vishal-038)
 
 ---
