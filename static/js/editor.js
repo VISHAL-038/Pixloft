@@ -2,6 +2,14 @@
 
 let largeImageWarningShown = false;
 
+// ── Performance ──
+let   processorWorker    = null;
+let   workerBusy         = false;
+let   pendingRedraw      = false;
+const DEBOUNCE_FAST      = 8;    // ms — sliders
+const DEBOUNCE_HEAVY     = 80;   // ms — convolutions (sharpen/NR)
+let   offscreenSupported = typeof OffscreenCanvas !== 'undefined';
+
 // ── DOM refs ──
 const canvas     = document.getElementById('mainCanvas');
 const ctx        = canvas.getContext('2d');
@@ -103,9 +111,11 @@ let curveDragging      = null;
 let curveHover         = null;
 
 // ── Preset state ──
+// ── Preset state ──
 let activePresetCategory = 'all';
 let customPresets        = [];
 const PRESETS_LS_KEY     = 'pixloft_presets';
+const thumbCache         = new Map(); 
 
 // ── LocalStorage key ──
 const LS_KEY = `pixloft_state_${typeof IMAGE_ID !== 'undefined' ? IMAGE_ID : 'default'}`;
@@ -126,12 +136,15 @@ function init() {
   bindWhiteBalance();
   initCurveCanvas();
   bindCurveChannels();
-  bindPresets(); 
+  bindPresets();
   bindExportModal();
   bindHistogramControls();
-  initTooltips();          
-  bindShortcutsPanel();    
-  loadProjectImages(); 
+  initTooltips();
+  bindShortcutsPanel();
+  loadProjectImages();
+  initResponsive();
+  bindTouchGestures();
+  initWorker();
 }
 
 // ═══════════════════════════════════════════
@@ -1168,24 +1181,53 @@ function redraw() {
   canvas.height = area.height;
 
   drawCheckerboard();
-  ctx.save();
 
+  // ── Try worker for pixel processing ──
+  const hasHeavyOps = state.params.sharpness > 0 || state.params.noise_reduction > 0;
+
+  if (processorWorker && !workerBusy && !hasHeavyOps) {
+    // Offload basic pixel ops to worker
+    workerBusy = true;
+    const srcData = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
+
+    processorWorker.postMessage({
+      imageData: srcData,
+      params:    state.params,
+      wbMatrix:  state._wbMatrix,
+    }, [srcData.data.buffer]);
+
+    // Worker will call back — store transform for callback
+    processorWorker._pendingTransform = {
+      rotation: state.params.rotation || 0,
+      zoom:     state.zoom,
+      offsetX:  state.offsetX,
+      offsetY:  state.offsetY,
+    };
+
+  } else {
+    // Fall back to main thread
+    _redrawMainThread();
+  }
+}
+
+function _redrawMainThread() {
+  if (!state.imageLoaded) return;
   const rotation = state.params.rotation || 0;
+
+  ctx.save();
   if (rotation !== 0) {
     const cx = state.offsetX + (offscreen.width  * state.zoom) / 2;
     const cy = state.offsetY + (offscreen.height * state.zoom) / 2;
     ctx.translate(cx, cy); ctx.rotate(rotation * Math.PI / 180); ctx.translate(-cx, -cy);
   }
-
   ctx.translate(state.offsetX, state.offsetY);
   ctx.scale(state.zoom, state.zoom);
 
   const srcData   = offscreenCtx.getImageData(0, 0, offscreen.width, offscreen.height);
   const processed = processPixels(srcData);
 
-  // Reuse temp canvas — only recreate when size changes (fixes the bug in your version)
   if (!state._tmpCanvas ||
-      state._tmpCanvas.width !== offscreen.width ||
+      state._tmpCanvas.width  !== offscreen.width ||
       state._tmpCanvas.height !== offscreen.height) {
     state._tmpCanvas = document.createElement('canvas');
     state._tmpCanvas.width  = offscreen.width;
@@ -1194,14 +1236,80 @@ function redraw() {
   }
   state._tmpCtx.putImageData(processed, 0, 0);
   ctx.drawImage(state._tmpCanvas, 0, 0);
-
   ctx.restore();
+
   if (crop.active) drawCropOverlay();
 }
 
-function scheduleRedraw() {
+function initWorker() {
+  try {
+    processorWorker = new Worker('/static/js/processor.worker.js');
+
+    processorWorker.onmessage = e => {
+      workerBusy = false;
+      if (e.data.error) {
+        console.warn('Worker error:', e.data.error);
+        _redrawMainThread();
+        return;
+      }
+
+      // Worker returned processed imageData — draw it
+      const processed = e.data.imageData;
+      const t         = processorWorker._pendingTransform || {};
+      const rotation  = t.rotation || 0;
+
+      ctx.save();
+      if (rotation !== 0) {
+        const cx = (t.offsetX || 0) + (offscreen.width  * (t.zoom||1)) / 2;
+        const cy = (t.offsetY || 0) + (offscreen.height * (t.zoom||1)) / 2;
+        ctx.translate(cx, cy); ctx.rotate(rotation * Math.PI / 180); ctx.translate(-cx, -cy);
+      }
+      ctx.translate(t.offsetX || 0, t.offsetY || 0);
+      ctx.scale(t.zoom || 1, t.zoom || 1);
+
+      if (!state._tmpCanvas ||
+          state._tmpCanvas.width  !== offscreen.width ||
+          state._tmpCanvas.height !== offscreen.height) {
+        state._tmpCanvas = document.createElement('canvas');
+        state._tmpCanvas.width  = offscreen.width;
+        state._tmpCanvas.height = offscreen.height;
+        state._tmpCtx = state._tmpCanvas.getContext('2d', { willReadFrequently: true });
+      }
+
+      // Reconstruct ImageData from transferred buffer
+      const id = new ImageData(
+        new Uint8ClampedArray(processed.data),
+        processed.width,
+        processed.height
+      );
+      state._tmpCtx.putImageData(id, 0, 0);
+      ctx.drawImage(state._tmpCanvas, 0, 0);
+      ctx.restore();
+
+      if (crop.active) drawCropOverlay();
+
+      // If a redraw was requested while worker was busy, do it now
+      if (pendingRedraw) {
+        pendingRedraw = false;
+        scheduleRedraw();
+      }
+    };
+
+    processorWorker.onerror = err => {
+      console.warn('Worker failed, falling back to main thread:', err);
+      processorWorker = null;
+      workerBusy      = false;
+    };
+  } catch (e) {
+    console.log('Workers not available, using main thread');
+    processorWorker = null;
+  }
+}
+
+function scheduleRedraw(heavy = false) {
   clearTimeout(redrawTimer);
-  redrawTimer = setTimeout(redraw, 8);
+  const delay = heavy ? DEBOUNCE_HEAVY : DEBOUNCE_FAST;
+  redrawTimer = setTimeout(redraw, delay);
 }
 
 function drawCheckerboard() {
@@ -1230,7 +1338,7 @@ function zoomTo(newZoom, originX, originY) {
   const ratio   = newZoom / state.zoom;
   state.offsetX = originX - ratio * (originX - state.offsetX);
   state.offsetY = originY - ratio * (originY - state.offsetY);
-  state.zoom    = newZoom; updateZoomLabel(); redraw();
+  state.zoom    = newZoom; updateZoomLabel(); rafRedraw();
 }
 
 function updateZoomLabel() { zoomLabel.textContent = Math.round(state.zoom * 100) + '%'; }
@@ -1435,251 +1543,6 @@ function bindHistogramControls() {
   });
 }
 
-// ═══════════════════════════════════════════
-//  TOOLTIP SYSTEM
-// ═══════════════════════════════════════════
-let tooltipEl      = null;
-let tooltipTimer   = null;
-
-function initTooltips() {
-  tooltipEl = document.getElementById('globalTooltip');
-  if (!tooltipEl) return;
-
-  document.addEventListener('mouseover', e => {
-    const target = e.target.closest('[data-tooltip]');
-    if (!target) return;
-
-    clearTimeout(tooltipTimer);
-    tooltipTimer = setTimeout(() => {
-      showTooltip(target.dataset.tooltip, target);
-    }, 500);
-  });
-
-  document.addEventListener('mouseout', e => {
-    const target = e.target.closest('[data-tooltip]');
-    if (!target) return;
-    clearTimeout(tooltipTimer);
-    hideTooltip();
-  });
-
-  // Hide on scroll or click
-  document.addEventListener('scroll', hideTooltip, true);
-  document.addEventListener('click',  hideTooltip, true);
-}
-
-function showTooltip(text, anchor) {
-  if (!tooltipEl || !text) return;
-  tooltipEl.textContent   = text;
-  tooltipEl.style.display = 'block';
-  tooltipEl.style.opacity = '0';
-
-  const rect    = anchor.getBoundingClientRect();
-  const tRect   = tooltipEl.getBoundingClientRect();
-  const scrollY = window.scrollY || 0;
-
-  // Position below the anchor, centred
-  let left = rect.left + (rect.width / 2) - (tRect.width / 2);
-  let top  = rect.bottom + scrollY + 6;
-
-  // Keep within viewport
-  left = Math.max(8, Math.min(left, window.innerWidth - tRect.width - 8));
-
-  tooltipEl.style.left    = `${left}px`;
-  tooltipEl.style.top     = `${top}px`;
-  tooltipEl.style.opacity = '1';
-}
-
-function hideTooltip() {
-  if (!tooltipEl) return;
-  tooltipEl.style.opacity = '0';
-  setTimeout(() => {
-    if (tooltipEl) tooltipEl.style.display = 'none';
-  }, 150);
-}
-
-// ═══════════════════════════════════════════
-//  SHORTCUTS PANEL TOGGLE
-// ═══════════════════════════════════════════
-function bindShortcutsPanel() {
-  const btn   = document.getElementById('btnToggleShortcuts');
-  const panel = document.getElementById('shortcutsPanel');
-  if (!btn || !panel) return;
-
-  btn.addEventListener('click', () => {
-    const isOpen = panel.style.display !== 'none';
-    panel.style.display = isOpen ? 'none' : 'block';
-    btn.textContent     = isOpen ? '?' : '✕';
-    btn.style.color     = isOpen ? '' : 'var(--accent)';
-  });
-}
-
-// ═══════════════════════════════════════════
-//  IMAGE CYCLING — arrow keys navigate
-//  between images in the same project
-// ═══════════════════════════════════════════
-let projectImages     = [];
-let currentImageIndex = -1;
-
-async function loadProjectImages() {
-  try {
-    const res  = await fetch(`/editor/api/project-images/${IMAGE_ID}/`);
-    if (!res.ok) return;
-    const data = await res.json();
-    projectImages     = data.images || [];
-    currentImageIndex = projectImages.findIndex(img => img.id === IMAGE_ID);
-    updateCycleHints();
-  } catch (e) {
-    // Silently fail — cycling is optional
-  }
-}
-
-function updateCycleHints() {
-  const hasPrev = currentImageIndex > 0;
-  const hasNext = currentImageIndex < projectImages.length - 1;
-
-  // Update hint text on canvas
-  if (projectImages.length > 1) {
-    const pos = `${currentImageIndex + 1} / ${projectImages.length}`;
-    showHint(`Image ${pos} · ← → to cycle`);
-  }
-}
-
-function cycleImage(direction) {
-  if (projectImages.length < 2) return;
-  const newIndex = currentImageIndex + direction;
-  if (newIndex < 0 || newIndex >= projectImages.length) return;
-
-  // Save current state before navigating
-  autoSave();
-
-  const nextImage = projectImages[newIndex];
-  showHint(`Going to ${nextImage.name}...`);
-  setTimeout(() => {
-    window.location.href = `/editor/${nextImage.id}/`;
-  }, 300);
-}
-
-// ═══════════════════════════════════════════
-//  ENHANCED KEYBOARD SHORTCUTS
-// ═══════════════════════════════════════════
-function bindKeyboard() {
-  document.addEventListener('keydown', e => {
-    // Don't fire shortcuts when typing in inputs
-    if (e.target.tagName === 'INPUT'    ||
-        e.target.tagName === 'TEXTAREA' ||
-        e.target.tagName === 'SELECT'   ||
-        e.target.isContentEditable) return;
-
-    const cx = canvas.width  / 2;
-    const cy = canvas.height / 2;
-
-    // ── Ctrl / Cmd shortcuts ──
-    if (e.ctrlKey || e.metaKey) {
-      switch (e.key) {
-        case 'z':
-          e.preventDefault();
-          e.shiftKey ? redo() : undo();
-          return;
-        case 'y':
-          e.preventDefault(); redo(); return;
-        case 's':
-          e.preventDefault();
-          document.getElementById('btnSaveState')?.click();
-          return;
-        case 'e':
-          e.preventDefault(); openExportModal(); return;
-      }
-      return; // don't process other shortcuts with Ctrl held
-    }
-
-    // ── Single key shortcuts ──
-    switch (e.key) {
-      // Zoom
-      case '0': fitToScreen(); break;
-      case '1': zoomTo(1, cx, cy); break;
-      case '2': zoomTo(2, cx, cy); break;
-      case '+':
-      case '=': zoomTo(state.zoom * 1.25, cx, cy); break;
-      case '-': zoomTo(state.zoom * 0.80, cx, cy); break;
-
-      // Edit actions
-      case 'b': case 'B':
-        document.getElementById('btnBefore')?.click(); break;
-      case 'r': case 'R':
-        document.getElementById('btnReset')?.click(); break;
-
-      // Export / Save
-      case 'e': case 'E':
-        if (!e.ctrlKey && !e.metaKey) openExportModal(); break;
-      case 's': case 'S':
-        if (!e.ctrlKey && !e.metaKey)
-          document.getElementById('btnSaveState')?.click();
-        break;
-
-      // Tools
-      case 'c': case 'C':
-        document.querySelector('[data-tool="crop"]')?.click(); break;
-      case 'v': case 'V':
-        document.querySelector('[data-tool="select"]')?.click(); break;
-
-      // Crop actions
-      case 'Enter':
-        if (crop.active) { applyCrop(); } break;
-      case 'Escape':
-        if (crop.active) deactivateCrop();
-        else hideTooltip();
-        break;
-
-      // Image cycling
-      case 'ArrowLeft':
-        e.preventDefault(); cycleImage(-1); break;
-      case 'ArrowRight':
-        e.preventDefault(); cycleImage(1);  break;
-
-      // Fit
-      case 'f': case 'F':
-        fitToScreen(); break;
-
-      // History shortcuts panel
-      case '?':
-        document.getElementById('btnToggleShortcuts')?.click(); break;
-    }
-  });
-}
-
-// ═══════════════════════════════════════════
-//  UX IMPROVEMENTS
-// ═══════════════════════════════════════════
-
-// Double-click slider label resets it — already done
-// Add visual feedback when shortcut fires
-
-function flashHint(msg) {
-  showHint(msg);
-}
-
-// Unsaved changes warning
-let hasUnsavedChanges = false;
-
-function markDirty() {
-  hasUnsavedChanges = true;
-}
-
-function markClean() {
-  hasUnsavedChanges = false;
-}
-
-window.addEventListener('beforeunload', e => {
-  if (hasUnsavedChanges && state.historyIndex > 0) {
-    e.preventDefault();
-    e.returnValue = 'You have unsaved edits. Leave anyway?';
-  }
-});
-
-// Mark dirty on every edit
-const _origPushHistory = pushHistory;
-// We wrap pushHistory to track dirty state
-// This is done inline — see updated pushHistory below
 
 // ═══════════════════════════════════════════
 //  SLIDER BINDING
@@ -1698,7 +1561,13 @@ function bindSliders() {
       valEl.textContent = value > 0 ? `+${value}` : `${value}`;
       valEl.style.color = value !== 0 ? 'var(--accent)' : 'var(--text-muted)';
       row.classList.toggle('slider-row--active', value !== 0);
-      updateSliderTrack(slider); scheduleRedraw(); drawHistogram();
+      updateSliderTrack(slider);
+    
+      // Heavy ops get longer debounce
+      const isHeavy = ['sharpness','noise_reduction','sharpen_radius',
+                        'sharpen_detail','noise_detail','noise_contrast'].includes(param);
+      scheduleRedraw(isHeavy);
+      drawHistogram();
     });
 
     slider.addEventListener('change', pushHistory);
@@ -1805,7 +1674,6 @@ function pushHistory() {
   state.historyIndex = state.history.length - 1;
   updateHistoryBtns(); updateHistoryPanel(); autoSave();
   hasUnsavedChanges = true;
-  // Show dirty dot on filename
   document.querySelector('.topbar-filename')?.classList.add('dirty');
 }
 
@@ -2051,7 +1919,6 @@ function generateThumbnail(preset, size = 60) {
   // Save current params
   const savedParams = JSON.parse(JSON.stringify(state.params));
 
-  // Temporarily apply preset params
   const safeParams = [
     'brightness','contrast','exposure','highlights','shadows',
     'saturation','vibrance','temperature','tint',
@@ -2059,48 +1926,46 @@ function generateThumbnail(preset, size = 60) {
     'noise_reduction','noise_detail','noise_contrast',
     'vignette','grain',
   ];
-  safeParams.forEach(key => {
-    state.params[key] = preset.params?.[key] ?? 0;
-  });
-  if (preset.hsl) state.params.hsl = JSON.parse(JSON.stringify(preset.hsl));
+  safeParams.forEach(key => { state.params[key] = preset.params?.[key] ?? 0; });
+  if (preset.hsl)   state.params.hsl   = JSON.parse(JSON.stringify(preset.hsl));
   if (preset.curve) state.params.curve = JSON.parse(JSON.stringify(preset.curve));
 
-  // Process pixels at thumbnail resolution
-  const scale     = Math.min(size / offscreen.width, size / offscreen.height);
-  const tw        = Math.round(offscreen.width  * scale);
-  const th        = Math.round(offscreen.height * scale);
+  // ── Use smaller thumbnail + skip heavy ops for speed ──
+  const thumbSize = 48; // smaller = faster
+  const scale     = Math.min(thumbSize / offscreen.width, thumbSize / offscreen.height);
+  const tw        = Math.max(1, Math.round(offscreen.width  * scale));
+  const th        = Math.max(1, Math.round(offscreen.height * scale));
 
-  const tmp       = document.createElement('canvas');
-  tmp.width       = tw; tmp.height = th;
-  const tmpCtx    = tmp.getContext('2d');
+  const tmp    = document.createElement('canvas');
+  tmp.width    = tw; tmp.height = th;
+  const tmpCtx = tmp.getContext('2d');
+
+  // Draw scaled-down version
   tmpCtx.drawImage(offscreen, 0, 0, tw, th);
 
+  // Skip sharpening/NR for thumbnails — too slow and invisible at this size
+  const origSharpness = state.params.sharpness;
+  const origNR        = state.params.noise_reduction;
+  state.params.sharpness       = 0;
+  state.params.noise_reduction = 0;
+
+  state._wbMatrix = buildWbMatrix(state.params.temperature, state.params.tint);
   const srcData   = tmpCtx.getImageData(0, 0, tw, th);
   const processed = processPixels(srcData);
   tmpCtx.putImageData(processed, 0, 0);
 
-  const dataUrl = tmp.toDataURL('image/jpeg', 0.7);
+  // Restore skipped params
+  state.params.sharpness       = origSharpness;
+  state.params.noise_reduction = origNR;
 
-  // Restore params
-  state.params.brightness      = savedParams.brightness;
-  state.params.contrast        = savedParams.contrast;
-  state.params.exposure        = savedParams.exposure;
-  state.params.highlights      = savedParams.highlights;
-  state.params.shadows         = savedParams.shadows;
-  state.params.saturation      = savedParams.saturation;
-  state.params.vibrance        = savedParams.vibrance;
-  state.params.temperature     = savedParams.temperature;
-  state.params.tint            = savedParams.tint;
-  state.params.sharpness       = savedParams.sharpness;
-  state.params.sharpen_radius  = savedParams.sharpen_radius;
-  state.params.sharpen_detail  = savedParams.sharpen_detail;
-  state.params.noise_reduction = savedParams.noise_reduction;
-  state.params.noise_detail    = savedParams.noise_detail;
-  state.params.noise_contrast  = savedParams.noise_contrast;
-  state.params.vignette        = savedParams.vignette;
-  state.params.grain           = savedParams.grain;
+  // Lower quality JPEG for thumbnails — good enough at 48px
+  const dataUrl = tmp.toDataURL('image/jpeg', 0.5);
+
+  // Restore all params
+  safeParams.forEach(key => { state.params[key] = savedParams[key]; });
   state.params.hsl   = JSON.parse(JSON.stringify(savedParams.hsl));
   state.params.curve = JSON.parse(JSON.stringify(savedParams.curve));
+  state._wbMatrix    = buildWbMatrix(state.params.temperature, state.params.tint);
 
   return dataUrl;
 }
@@ -2111,59 +1976,59 @@ function renderPresetGrid() {
   if (!grid) return;
   grid.innerHTML = '';
 
-  const allPresets = [
-    ...BUILTIN_PRESETS,
-    ...customPresets,
-  ];
-
-  const filtered = activePresetCategory === 'all'    ? allPresets
-                 : activePresetCategory === 'builtin' ? BUILTIN_PRESETS
-                 : customPresets;
+  const allPresets = [...BUILTIN_PRESETS, ...customPresets];
+  const filtered   = activePresetCategory === 'all'     ? allPresets
+                   : activePresetCategory === 'builtin'  ? BUILTIN_PRESETS
+                   : customPresets;
 
   if (filtered.length === 0) {
     grid.innerHTML = '<div class="preset-empty">No presets yet — save your current edits above</div>';
     return;
   }
 
-  filtered.forEach((preset, index) => {
+  filtered.forEach(preset => {
     const card = document.createElement('div');
     card.className = 'preset-card';
     card.title     = preset.name;
 
-    // Generate thumbnail
-    const thumb = generateThumbnail(preset, 80);
+    const cacheKey = `${preset.name}_${preset.timestamp || 'builtin'}`;
+    let   thumb    = thumbCache.get(cacheKey);
+    if (!thumb && state.imageLoaded) {
+      thumb = generateThumbnail(preset, 48);
+      if (thumb) thumbCache.set(cacheKey, thumb);
+    }
 
     card.innerHTML = `
       <div class="preset-thumb">
         ${thumb
           ? `<img src="${thumb}" alt="${preset.name}" loading="lazy">`
-          : `<div class="preset-thumb-placeholder">◈</div>`
-        }
+          : `<div class="preset-thumb-placeholder">◈</div>`}
         ${preset.category === 'custom'
-          ? `<button class="preset-delete" data-index="${index}" title="Delete preset">✕</button>`
-          : ''
-        }
+          ? `<button class="preset-delete" title="Delete preset">✕</button>`
+          : ''}
       </div>
       <div class="preset-name">${preset.name}</div>
     `;
 
-    // Apply on click
     card.addEventListener('click', e => {
       if (e.target.classList.contains('preset-delete')) return;
       document.querySelectorAll('.preset-card').forEach(c => c.classList.remove('preset-card--active'));
       card.classList.add('preset-card--active');
       applyPreset(preset);
+      thumbCache.clear();
     });
 
-    // Delete custom preset
     const delBtn = card.querySelector('.preset-delete');
     if (delBtn) {
       delBtn.addEventListener('click', e => {
         e.stopPropagation();
-        const customIndex = customPresets.findIndex(p => p.name === preset.name && p.timestamp === preset.timestamp);
-        if (customIndex >= 0) {
-          customPresets.splice(customIndex, 1);
+        const idx = customPresets.findIndex(
+          p => p.name === preset.name && p.timestamp === preset.timestamp
+        );
+        if (idx >= 0) {
+          customPresets.splice(idx, 1);
           saveCustomPresets();
+          thumbCache.delete(cacheKey);
           renderPresetGrid();
           showHint(`Deleted preset: ${preset.name}`);
         }
@@ -2173,7 +2038,6 @@ function renderPresetGrid() {
     grid.appendChild(card);
   });
 }
-
 // Bind preset UI
 function bindPresets() {
   loadCustomPresets();
@@ -2412,6 +2276,8 @@ Object.keys(state.params).forEach(k => {
   pushHistory(); updateHistoryPanel(); updateHistoryBtns();
   showHint('Reset to original image ◉');
   hasUnsavedChanges = false;
+  thumbCache.clear();
+  document.querySelector('.topbar-filename')?.classList.remove('dirty');
 }
 
 // ═══════════════════════════════════════════
@@ -2482,7 +2348,7 @@ function bindCanvasEvents() {
 
     if (state.isPanning) {
       state.offsetX=state.panOriginX+(e.clientX-state.panStartX);
-      state.offsetY=state.panOriginY+(e.clientY-state.panStartY); redraw();
+      state.offsetY=state.panOriginY+(e.clientY-state.panStartY); rafRedraw();
     }
   });
 
@@ -2495,28 +2361,6 @@ function bindCanvasEvents() {
     }
     if (state.isPanning) { state.isPanning=false; canvas.style.cursor=state.spaceHeld?'grab':'crosshair'; }
   });
-
-  let lastPinch=null;
-  canvas.addEventListener('touchstart', e => { if (e.touches.length===2) lastPinch=pinchDist(e); }, {passive:true});
-  canvas.addEventListener('touchmove', e => {
-    if (e.touches.length!==2) return; e.preventDefault();
-    const d=pinchDist(e), rect=canvas.getBoundingClientRect();
-    const cx=(e.touches[0].clientX+e.touches[1].clientX)/2-rect.left;
-    const cy=(e.touches[0].clientY+e.touches[1].clientY)/2-rect.top;
-    zoomTo(state.zoom*d/lastPinch,cx,cy); lastPinch=d;
-  }, {passive:false});
-
-  canvas.addEventListener('dblclick', e => {
-    if (crop.active) return;
-    const rect=canvas.getBoundingClientRect();
-    zoomTo(state.zoom<1.5?2:1, e.clientX-rect.left, e.clientY-rect.top);
-  });
-}
-
-function pinchDist(e) {
-  const dx=e.touches[0].clientX-e.touches[1].clientX;
-  const dy=e.touches[0].clientY-e.touches[1].clientY;
-  return Math.sqrt(dx*dx+dy*dy);
 }
 
 window.addEventListener('keydown', e => {
@@ -2800,29 +2644,332 @@ function bindHistoryPanel() {
 }
 
 // ═══════════════════════════════════════════
-//  KEYBOARD SHORTCUTS
+//  ENHANCED KEYBOARD SHORTCUTS — Day 20
 // ═══════════════════════════════════════════
 function bindKeyboard() {
   document.addEventListener('keydown', e => {
-    if (e.target.tagName==='INPUT') return;
-    const cx=canvas.width/2, cy=canvas.height/2;
-    if ((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey) { e.preventDefault(); undo(); }
-    if ((e.ctrlKey||e.metaKey)&&e.key==='y')               { e.preventDefault(); redo(); }
-    if ((e.ctrlKey||e.metaKey)&&e.key==='z'&&e.shiftKey)   { e.preventDefault(); redo(); }
-    switch(e.key) {
+    if (e.target.tagName==='INPUT'    ||
+        e.target.tagName==='TEXTAREA' ||
+        e.target.tagName==='SELECT'   ||
+        e.target.isContentEditable) return;
+
+    const cx = canvas.width / 2, cy = canvas.height / 2;
+
+    // Ctrl / Cmd shortcuts
+    if (e.ctrlKey || e.metaKey) {
+      switch (e.key) {
+        case 'z': e.preventDefault(); e.shiftKey ? redo() : undo(); return;
+        case 'y': e.preventDefault(); redo(); return;
+        case 's': e.preventDefault(); document.getElementById('btnSaveState')?.click(); return;
+        case 'e': e.preventDefault(); openExportModal(); return;
+      }
+      return;
+    }
+
+    switch (e.key) {
       case '0': fitToScreen(); break;
-      case '1': zoomTo(1,cx,cy); break;
-      case '2': zoomTo(2,cx,cy); break;
-      case '+': case '=': zoomTo(state.zoom*1.25,cx,cy); break;
-      case '-': zoomTo(state.zoom*0.80,cx,cy); break;
-      case 'b': case 'B': document.getElementById('btnBefore').click(); break;
-      case 'r': case 'R': document.getElementById('btnReset').click(); break;
+      case '1': zoomTo(1, cx, cy); break;
+      case '2': zoomTo(2, cx, cy); break;
+      case '+': case '=': zoomTo(state.zoom*1.25, cx, cy); break;
+      case '-': zoomTo(state.zoom*0.80, cx, cy); break;
+      case 'b': case 'B': document.getElementById('btnBefore')?.click(); break;
+      case 'r': case 'R': document.getElementById('btnReset')?.click(); break;
+      case 'e': case 'E': openExportModal(); break;
+      case 's': case 'S': document.getElementById('btnSaveState')?.click(); break;
       case 'c': case 'C': document.querySelector('[data-tool="crop"]')?.click(); break;
-      case 'Escape': if (crop.active) deactivateCrop(); break;
+      case 'v': case 'V': document.querySelector('[data-tool="select"]')?.click(); break;
+      case 'f': case 'F': fitToScreen(); break;
+      case '?': document.getElementById('btnToggleShortcuts')?.click(); break;
       case 'Enter':  if (crop.active) applyCrop(); break;
+      case 'Escape':
+        if (crop.active) deactivateCrop();
+        else hideTooltip();
+        break;
+      case 'ArrowLeft':  e.preventDefault(); cycleImage(-1); break;
+      case 'ArrowRight': e.preventDefault(); cycleImage(1);  break;
     }
   });
 }
+
+// ═══════════════════════════════════════════
+//  TOOLTIP SYSTEM — Day 20
+// ═══════════════════════════════════════════
+let tooltipEl    = null;
+let tooltipTimer = null;
+
+function initTooltips() {
+  tooltipEl = document.getElementById('globalTooltip');
+  if (!tooltipEl) return;
+
+  document.addEventListener('mouseover', e => {
+    const target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => showTooltip(target.dataset.tooltip, target), 500);
+  });
+
+  document.addEventListener('mouseout', e => {
+    const target = e.target.closest('[data-tooltip]');
+    if (!target) return;
+    clearTimeout(tooltipTimer);
+    hideTooltip();
+  });
+
+  document.addEventListener('scroll', hideTooltip, true);
+  document.addEventListener('click',  hideTooltip, true);
+}
+
+function showTooltip(text, anchor) {
+  if (!tooltipEl || !text) return;
+  tooltipEl.textContent   = text;
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.opacity = '0';
+
+  const rect  = anchor.getBoundingClientRect();
+  const tRect = tooltipEl.getBoundingClientRect();
+  let left    = rect.left + rect.width/2 - tRect.width/2;
+  let top     = rect.bottom + (window.scrollY||0) + 6;
+  left = Math.max(8, Math.min(left, window.innerWidth - tRect.width - 8));
+
+  tooltipEl.style.left    = `${left}px`;
+  tooltipEl.style.top     = `${top}px`;
+  tooltipEl.style.opacity = '1';
+}
+
+function hideTooltip() {
+  if (!tooltipEl) return;
+  tooltipEl.style.opacity = '0';
+  setTimeout(() => { if (tooltipEl) tooltipEl.style.display = 'none'; }, 150);
+}
+
+// ═══════════════════════════════════════════
+//  SHORTCUTS PANEL — Day 20
+// ═══════════════════════════════════════════
+function bindShortcutsPanel() {
+  const btn   = document.getElementById('btnToggleShortcuts');
+  const panel = document.getElementById('shortcutsPanel');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', () => {
+    const isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+    btn.textContent     = isOpen ? '?' : '✕';
+    btn.style.color     = isOpen ? '' : 'var(--accent)';
+  });
+}
+
+// ═══════════════════════════════════════════
+//  IMAGE CYCLING — Day 20
+// ═══════════════════════════════════════════
+let projectImages     = [];
+let currentImageIndex = -1;
+
+async function loadProjectImages() {
+  try {
+    const res = await fetch(`/editor/api/project-images/${IMAGE_ID}/`);
+    if (!res.ok) return;
+    const data        = await res.json();
+    projectImages     = data.images || [];
+    currentImageIndex = projectImages.findIndex(img => img.id === IMAGE_ID);
+    if (projectImages.length > 1) {
+      showHint(`Image ${currentImageIndex+1} / ${projectImages.length} · ← → to cycle`);
+    }
+  } catch (e) { /* silently fail */ }
+}
+
+function cycleImage(direction) {
+  if (projectImages.length < 2) return;
+  const newIndex = currentImageIndex + direction;
+  if (newIndex < 0 || newIndex >= projectImages.length) return;
+  autoSave();
+  const next = projectImages[newIndex];
+  showHint(`Going to ${next.original_name || next.name}...`);
+  setTimeout(() => { window.location.href = `/editor/${next.id}/`; }, 300);
+}
+
+// ═══════════════════════════════════════════
+//  UNSAVED CHANGES — Day 20
+// ═══════════════════════════════════════════
+let hasUnsavedChanges = false;
+
+window.addEventListener('beforeunload', e => {
+  if (hasUnsavedChanges && state.historyIndex > 0) {
+    e.preventDefault();
+    e.returnValue = 'You have unsaved edits. Leave anyway?';
+  }
+});
+
+// ═══════════════════════════════════════════
+//  RESPONSIVE & MOBILE — Day 21
+// ═══════════════════════════════════════════
+let isMobile          = false;
+let activeMobilePanel = null;
+
+function initResponsive() {
+  checkMobile();
+  window.addEventListener('resize', () => {
+    checkMobile();
+    if (state.imageLoaded) fitToScreen();
+  });
+  bindMobileToolbar();
+  bindMobilePanelOverlay();
+  improveTouchSliders();
+}
+
+function checkMobile() {
+  isMobile = window.innerWidth < 768;
+  document.body.classList.toggle('is-mobile', isMobile);
+  if (isMobile) closeMobilePanel();
+}
+
+function bindMobileToolbar() {
+  document.getElementById('mobileTools')?.addEventListener('click', () => toggleMobilePanel('left'));
+  document.getElementById('mobileCrop')?.addEventListener('click', () => {
+    closeMobilePanel();
+    document.querySelector('[data-tool="crop"]')?.click();
+  });
+  document.getElementById('mobileAdjust')?.addEventListener('click', () => toggleMobilePanel('right'));
+  document.getElementById('mobileExportBtn')?.addEventListener('click', openExportModal);
+}
+
+function toggleMobilePanel(side) {
+  activeMobilePanel === side ? closeMobilePanel() : openMobilePanel(side);
+}
+
+function openMobilePanel(side) {
+  closeMobilePanel();
+  activeMobilePanel = side;
+  const panel   = document.getElementById(side === 'left' ? 'leftPanel' : 'rightPanel');
+  const overlay = document.getElementById('mobilePanelOverlay');
+  if (panel)   { panel.classList.add('mobile-panel--open'); panel.style.transform = 'translateX(0)'; }
+  if (overlay) { overlay.style.display = 'block'; setTimeout(() => overlay.style.opacity = '1', 10); }
+  document.querySelectorAll('.mobile-tool-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(side === 'left' ? 'mobileTools' : 'mobileAdjust')?.classList.add('active');
+}
+
+function closeMobilePanel() {
+  if (!activeMobilePanel) return;
+  [document.getElementById('leftPanel'), document.getElementById('rightPanel')].forEach(p => {
+    if (p) { p.classList.remove('mobile-panel--open'); p.style.transform = ''; }
+  });
+  const overlay = document.getElementById('mobilePanelOverlay');
+  if (overlay) { overlay.style.opacity = '0'; setTimeout(() => overlay.style.display = 'none', 250); }
+  document.querySelectorAll('.mobile-tool-btn').forEach(b => b.classList.remove('active'));
+  activeMobilePanel = null;
+}
+
+function bindMobilePanelOverlay() {
+  document.getElementById('mobilePanelOverlay')?.addEventListener('click', closeMobilePanel);
+}
+
+function improveTouchSliders() {
+  document.querySelectorAll('.adj-slider').forEach(slider => {
+    slider.style.touchAction = 'none';
+    slider.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+    slider.addEventListener('touchmove', e => {
+      e.stopPropagation();
+      const touch = e.touches[0];
+      const rect  = slider.getBoundingClientRect();
+      const pct   = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
+      const min   = parseInt(slider.min), max = parseInt(slider.max);
+      const value = Math.round(min + pct * (max - min));
+      if (slider.value != value) {
+        slider.value = value;
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }, { passive: true });
+  });
+}
+
+// ═══════════════════════════════════════════
+//  TOUCH GESTURES — Day 21
+// ═══════════════════════════════════════════
+function bindTouchGestures() {
+  let touches       = [];
+  let lastPinchDist = 0;
+  let lastPinchCx   = 0;
+  let lastPinchCy   = 0;
+  let lastTouchX    = 0;
+  let lastTouchY    = 0;
+  let touchMode     = null;
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    touches = Array.from(e.touches);
+    if (touches.length === 1) {
+      touchMode  = 'pan';
+      lastTouchX = touches[0].clientX;
+      lastTouchY = touches[0].clientY;
+    } else if (touches.length === 2) {
+      touchMode     = 'pinch';
+      lastPinchDist = getTouchDist(touches);
+      const rect    = canvas.getBoundingClientRect();
+      lastPinchCx   = (touches[0].clientX + touches[1].clientX) / 2 - rect.left;
+      lastPinchCy   = (touches[0].clientY + touches[1].clientY) / 2 - rect.top;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    touches = Array.from(e.touches);
+    const rect = canvas.getBoundingClientRect();
+
+    if (touchMode === 'pan' && touches.length === 1) {
+      state.offsetX += touches[0].clientX - lastTouchX;
+      state.offsetY += touches[0].clientY - lastTouchY;
+      lastTouchX     = touches[0].clientX;
+      lastTouchY     = touches[0].clientY;
+      rafRedraw();
+    } else if (touchMode === 'pinch' && touches.length === 2) {
+      const dist  = getTouchDist(touches);
+      const cx    = (touches[0].clientX + touches[1].clientX) / 2 - rect.left;
+      const cy    = (touches[0].clientY + touches[1].clientY) / 2 - rect.top;
+      zoomTo(state.zoom * dist / lastPinchDist, cx, cy);
+      state.offsetX += cx - lastPinchCx;
+      state.offsetY += cy - lastPinchCy;
+      lastPinchDist  = dist;
+      lastPinchCx    = cx;
+      lastPinchCy    = cy;
+      rafRedraw();
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', e => {
+    touches = Array.from(e.touches);
+    if (touches.length === 0) touchMode = null;
+    else if (touches.length === 1) {
+      touchMode  = 'pan';
+      lastTouchX = touches[0].clientX;
+      lastTouchY = touches[0].clientY;
+    }
+  }, { passive: true });
+
+  // Double-click to zoom
+  canvas.addEventListener('dblclick', e => {
+    if (crop.active) return;
+    const rect = canvas.getBoundingClientRect();
+    zoomTo(state.zoom < 1.5 ? 2 : 1, e.clientX - rect.left, e.clientY - rect.top);
+  });
+}
+
+function getTouchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+// ═══════════════════════════════════════════
+//  RAF THROTTLE — Day 22
+// ═══════════════════════════════════════════
+let _rafPending = false;
+
+function rafRedraw() {
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => { _rafPending = false; redraw(); });
+}
+
+
+
 
 // ═══════════════════════════════════════════
 //  WHITE BALANCE PRESETS
